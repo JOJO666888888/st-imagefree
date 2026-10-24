@@ -1,0 +1,11 @@
+{
+    "display_name": "ImageFree 自动配图",
+    "loading_order": 20,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "workbuddy",
+    "version": "1.0.0",
+    "homePage": ""
+}

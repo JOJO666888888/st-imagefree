@@ -1,0 +1,95 @@
+<div class="imagefree-settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>ImageFree 自动配图</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+
+            <label class="checkbox_label" for="if_enabled">
+                <input type="checkbox" id="if_enabled">
+                <span>启用自动配图</span>
+            </label>
+            <small class="if-hint">开启后，AI 每回复若干楼会自动生成一张配图并嵌入该楼层。</small>
+
+            <hr>
+
+            <label for="if_api_base">API 地址</label>
+            <input type="text" id="if_api_base" class="text_pole" placeholder="http://127.0.0.1:8080/v1">
+            <small class="if-hint">填到 <code>/v1</code> 为止，例如 <code>http://127.0.0.1:8080/v1</code></small>
+
+            <label for="if_api_key">API Key</label>
+            <input type="password" id="if_api_key" class="text_pole" placeholder="sk-...">
+
+            <label for="if_model">模型名</label>
+            <input type="text" id="if_model" class="text_pole" placeholder="imagefree-1">
+
+            <div class="if-row">
+                <div class="if-col">
+                    <label for="if_aspect">画幅</label>
+                    <select id="if_aspect" class="text_pole">
+                        <option value="3:4">竖版 3:4（推荐人物）</option>
+                        <option value="9:16">竖版 9:16（手机长图）</option>
+                        <option value="1:1">方形 1:1</option>
+                        <option value="4:3">横版 4:3</option>
+                        <option value="16:9">横版 16:9（风景）</option>
+                    </select>
+                </div>
+                <div class="if-col">
+                    <label for="if_display_size">显示大小</label>
+                    <select id="if_display_size" class="text_pole">
+                        <option value="small">小</option>
+                        <option value="medium">中</option>
+                        <option value="large">大</option>
+                        <option value="full">铺满</option>
+                    </select>
+                </div>
+            </div>
+
+            <hr>
+
+            <label for="if_mode">提示词来源</label>
+            <select id="if_mode" class="text_pole">
+                <option value="direct">直接取正文（快，零额外开销）</option>
+                <option value="llm">让对话模型写提示词（准，多一次 LLM 调用）</option>
+            </select>
+            <small class="if-hint">
+                <b>直接取正文</b>：把本楼文字截一段直接当提示词，最省事；
+                <b>LLM 写词</b>：额外调一次当前对话模型，把剧情浓缩成画面描述，效果更贴。
+            </small>
+
+            <div class="if-row">
+                <div class="if-col">
+                    <label for="if_interval">每 N 楼出图</label>
+                    <input type="number" id="if_interval" class="text_pole" min="1" max="20" step="1">
+                </div>
+                <div class="if-col">
+                    <label for="if_maxchars">正文截取字数</label>
+                    <input type="number" id="if_maxchars" class="text_pole" min="80" max="2000" step="20">
+                </div>
+            </div>
+
+            <label class="checkbox_label" for="if_store">
+                <input type="checkbox" id="if_store">
+                <span>把图片存进酒馆（推荐）</span>
+            </label>
+            <small class="if-hint">勾选后图片落到酒馆 <code>user/images</code>，换设备、换机器都不会失效。</small>
+
+            <label class="checkbox_label" for="if_show_button">
+                <input type="checkbox" id="if_show_button">
+                <span>在楼层显示「配图」按钮</span>
+            </label>
+
+            <hr>
+
+            <div class="if-actions">
+                <button id="if_test" class="menu_button">测试连接</button>
+                <button id="if_generate_last" class="menu_button">为最后一楼配图</button>
+            </div>
+
+            <small class="if-hint if-warn">
+                单张约 15~25 秒，上游每 IP 最多 3 张并行。频繁出图会占用站方免费额度，建议间隔设为 2 楼以上。
+            </small>
+        </div>
+    </div>
+</div>
