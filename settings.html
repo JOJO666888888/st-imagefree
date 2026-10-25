@@ -10,16 +10,20 @@
                 <input type="checkbox" id="if_enabled">
                 <span>启用自动配图</span>
             </label>
-            <small class="if-hint">开启后，AI 每回复若干楼会自动生成一张配图并嵌入该楼层。</small>
+            <small class="if-hint">
+                AI 每回复一楼，自动挑一段剧情出图，并把图片<b>插在这段文字的后面</b>
+                （不是塞到楼层底部的图廊里）。
+            </small>
 
             <hr>
 
             <label for="if_api_base">API 地址</label>
             <input type="text" id="if_api_base" class="text_pole" placeholder="http://127.0.0.1:8080/v1">
-            <small class="if-hint">填到 <code>/v1</code> 为止，例如 <code>http://127.0.0.1:8080/v1</code></small>
+            <small class="if-hint">填到 <code>/v1</code> 为止。本地中转就是 <code>http://127.0.0.1:8080/v1</code>。</small>
 
             <label for="if_api_key">API Key</label>
-            <input type="password" id="if_api_key" class="text_pole" placeholder="sk-...">
+            <input type="password" id="if_api_key" class="text_pole" placeholder="imagefree-2api 的 RELAY_API_KEY">
+            <small class="if-hint">中转服务默认要求 <code>1234567A</code>；留空会被回 401。</small>
 
             <label for="if_model">模型名</label>
             <input type="text" id="if_model" class="text_pole" placeholder="imagefree-1">
@@ -54,8 +58,20 @@
                 <option value="llm">让对话模型写提示词（准，多一次 LLM 调用）</option>
             </select>
             <small class="if-hint">
-                <b>直接取正文</b>：把本楼文字截一段直接当提示词，最省事；
-                <b>LLM 写词</b>：额外调一次当前对话模型，把剧情浓缩成画面描述，效果更贴。
+                <b>直接取正文</b>：挑本楼最像画面的一段当提示词；
+                <b>LLM 写词</b>：额外调一次当前对话模型，把剧情浓缩成画面描述。
+            </small>
+
+            <label for="if_position">图片插入位置</label>
+            <select id="if_position" class="text_pole">
+                <option value="auto">按剧情自动匹配（推荐）</option>
+                <option value="first">正文开头那段之后</option>
+                <option value="end">楼层末尾</option>
+                <option value="random">正文里随机一段</option>
+            </select>
+            <small class="if-hint">
+                「自动匹配」会把提示词和每段正文做相似度比对，插到最像的那段后面；
+                段落序号 + 段首文字会一起存进聊天存档，刷新/换设备后还能找回原位置。
             </small>
 
             <div class="if-row">
@@ -64,31 +80,67 @@
                     <input type="number" id="if_interval" class="text_pole" min="1" max="20" step="1">
                 </div>
                 <div class="if-col">
+                    <label for="if_per_message">每楼最多几张</label>
+                    <input type="number" id="if_per_message" class="text_pole" min="1" max="4" step="1">
+                </div>
+            </div>
+            <small class="if-hint">设成 1 = 每条 AI 回复都出图。多张图会按生成顺序依次排在同一段后面。</small>
+
+            <div class="if-row">
+                <div class="if-col">
                     <label for="if_maxchars">正文截取字数</label>
                     <input type="number" id="if_maxchars" class="text_pole" min="80" max="2000" step="20">
                 </div>
+                <div class="if-col">
+                    <label for="if_timeout">超时（秒）</label>
+                    <input type="number" id="if_timeout" class="text_pole" min="30" max="600" step="10">
+                </div>
+                <div class="if-col">
+                    <label for="if_retries">失败重试</label>
+                    <input type="number" id="if_retries" class="text_pole" min="0" max="3" step="1">
+                </div>
             </div>
+
+            <hr>
 
             <label class="checkbox_label" for="if_store">
                 <input type="checkbox" id="if_store">
                 <span>把图片存进酒馆（推荐）</span>
             </label>
-            <small class="if-hint">勾选后图片落到酒馆 <code>user/images</code>，换设备、换机器都不会失效。</small>
+            <small class="if-hint">勾选后图片落到酒馆 <code>user/images</code>，换设备、清缓存都不会失效。</small>
+
+            <label class="checkbox_label" for="if_auto_swipe">
+                <input type="checkbox" id="if_auto_swipe">
+                <span>换 swipe 时也自动配图</span>
+            </label>
+            <small class="if-hint">每一条 swipe 都有自己的图；切回旧的 swipe 会显示当时那张。</small>
 
             <label class="checkbox_label" for="if_show_button">
                 <input type="checkbox" id="if_show_button">
                 <span>在楼层显示「配图」按钮</span>
             </label>
 
+            <label class="checkbox_label" for="if_show_caption">
+                <input type="checkbox" id="if_show_caption">
+                <span>在图片下方显示提示词</span>
+            </label>
+
+            <label class="checkbox_label" for="if_debug">
+                <input type="checkbox" id="if_debug">
+                <span>调试日志（控制台）</span>
+            </label>
+            <small class="if-hint">排查时打开：控制台会打印每次触发、锚点段落、水合结果。</small>
+
             <hr>
 
             <div class="if-actions">
                 <button id="if_test" class="menu_button">测试连接</button>
                 <button id="if_generate_last" class="menu_button">为最后一楼配图</button>
+                <button id="if_diagnose" class="menu_button">运行诊断</button>
             </div>
 
             <small class="if-hint if-warn">
-                单张约 15~25 秒，上游每 IP 最多 3 张并行。频繁出图会占用站方免费额度，建议间隔设为 2 楼以上。
+                单张约 15~30 秒，上游每 IP 最多 3 张并行。频繁出图会占用站方免费额度，建议间隔设为 1~2 楼。
             </small>
         </div>
     </div>

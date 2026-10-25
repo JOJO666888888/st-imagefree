@@ -1,0 +1,12 @@
+{
+  "name": "st-imagefree-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test core.test.mjs flow.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^26.0.0",
+    "jquery": "^3.7.1"
+  }
+}
