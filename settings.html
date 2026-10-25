@@ -54,13 +54,137 @@
 
             <label for="if_mode">提示词来源</label>
             <select id="if_mode" class="text_pole">
+                <option value="rewrite">独立 API 重写（推荐，不依赖预设）</option>
                 <option value="direct">直接取正文（快，零额外开销）</option>
-                <option value="llm">让对话模型写提示词（准，多一次 LLM 调用）</option>
+                <option value="llm">主模型 quiet prompt（旧方案，会跑当前预设）</option>
             </select>
             <small class="if-hint">
-                <b>直接取正文</b>：挑本楼最像画面的一段当提示词；
-                <b>LLM 写词</b>：额外调一次当前对话模型，把剧情浓缩成画面描述。
+                <b>独立 API 重写</b>：另配一条 OpenAI 兼容接口，只干「正文 → 绘图提示词」，
+                不读对话预设、不占对话额度、不往聊天里塞标签 —— 换任何预设都不受影响。<br>
+                <b>直接取正文</b>：挑本楼最像画面的一段直接当提示词，长文容易出乱图。<br>
+                <b>旧方案</b>：走酒馆的 quiet prompt，等于用当前预设再写一遍 —— 这正是
+                「重写逻辑被绑进预设」的老毛病，仅为兼容保留。
             </small>
+
+            <div class="if-subdrawer">
+                <div class="inline-drawer">
+                    <div class="inline-drawer-toggle inline-drawer-header">
+                        <b>提示词重写 API</b>
+                        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                    </div>
+                    <div class="inline-drawer-content">
+                        <label for="if_rw_source">重写走哪条 API</label>
+                        <select id="if_rw_source" class="text_pole">
+                            <option value="dedicated">专用 API（下面这套地址 / Key）</option>
+                            <option value="main">复用主 API（酒馆生成正文用的那条）</option>
+                        </select>
+                        <small class="if-hint">
+                            选<b>复用主 API</b> 就不用再填 Key：请求走酒馆自己的
+                            <code>/api/backends/chat-completions/generate</code>，
+                            Key 始终留在服务端。同样不读预设、不写聊天记录，
+                            只是借一条通道把「正文 → 提示词」跑掉。
+                        </small>
+
+                        <div id="if_rw_main_box">
+                            <label for="if_rw_profile">使用哪条连接</label>
+                            <select id="if_rw_profile" class="text_pole">
+                                <option value="">当前对话连接（推荐）</option>
+                            </select>
+                            <div class="if-actions">
+                                <button id="if_rw_profiles" class="menu_button">刷新连接列表</button>
+                            </div>
+                            <small class="if-hint">
+                                想固定用别的模型？先在酒馆「连接管理器」里存一个档案，这里就能选。
+                                选档案时会<b>忽略档案自带的预设</b>（不会把出图规则带跑）。
+                            </small>
+                        </div>
+
+                        <div id="if_rw_dedicated_box">
+                            <small class="if-hint">
+                                任何 OpenAI 兼容的 <code>/chat/completions</code> 都行（DeepSeek、Qwen、GLM、本地 Ollama / LM Studio…）。
+                                地址填到 <code>/v1</code> 为止；只填域名会自动补 <code>/chat/completions</code>。
+                            </small>
+
+                            <label for="if_rw_base">重写 API 地址</label>
+                            <input type="text" id="if_rw_base" class="text_pole" placeholder="https://api.deepseek.com/v1">
+
+                            <label for="if_rw_key">重写 API Key</label>
+                            <input type="password" id="if_rw_key" class="text_pole" placeholder="sk-...">
+
+                            <label for="if_rw_model">重写模型</label>
+                            <input type="text" id="if_rw_model" class="text_pole" placeholder="deepseek-chat / qwen-plus / gpt-4o-mini">
+                        </div>
+
+                        <div class="if-row">
+                            <div class="if-col">
+                                <label for="if_rw_temp">温度</label>
+                                <input type="number" id="if_rw_temp" class="text_pole" min="0" max="2" step="0.1">
+                            </div>
+                            <div class="if-col">
+                                <label for="if_rw_maxtok">最大 tokens</label>
+                                <input type="number" id="if_rw_maxtok" class="text_pole" min="64" max="4000" step="32">
+                            </div>
+                        </div>
+
+                        <div class="if-row">
+                            <div class="if-col">
+                                <label for="if_rw_timeout">超时（秒）</label>
+                                <input type="number" id="if_rw_timeout" class="text_pole" min="10" max="300" step="5">
+                            </div>
+                            <div class="if-col">
+                                <label for="if_rw_retries">失败重试</label>
+                                <input type="number" id="if_rw_retries" class="text_pole" min="0" max="2" step="1">
+                            </div>
+                            <div class="if-col">
+                                <label for="if_rw_story">正文上限（字）</label>
+                                <input type="number" id="if_rw_story" class="text_pole" min="200" max="8000" step="200">
+                            </div>
+                        </div>
+
+                        <div class="if-row">
+                            <div class="if-col">
+                                <label for="if_rw_lang">提示词语言</label>
+                                <select id="if_rw_lang" class="text_pole">
+                                    <option value="en">英文（多数模型更准）</option>
+                                    <option value="zh">中文</option>
+                                </select>
+                            </div>
+                            <div class="if-col">
+                                <label for="if_rw_style">风格后缀</label>
+                                <input type="text" id="if_rw_style" class="text_pole" placeholder="cinematic, soft light, highly detailed">
+                            </div>
+                        </div>
+                        <small class="if-hint">
+                            风格后缀会拼在模型写出的提示词后面，模型本身不用写画质词 —— 想统一画风改这里就行。
+                        </small>
+
+                        <label class="checkbox_label" for="if_rw_json">
+                            <input type="checkbox" id="if_rw_json">
+                            <span>用 JSON 模式请求（模型支持 response_format 时更稳）</span>
+                        </label>
+
+                        <label for="if_rw_system">重写规则（system prompt）</label>
+                        <textarea id="if_rw_system" class="text_pole if-textarea" rows="10"
+                                  placeholder="留空 = 使用内置规则"></textarea>
+                        <small class="if-hint">清空这个框 = 回到内置规则（内置规则已按「一段正文 → 一条提示词」调好）。</small>
+
+                        <label for="if_rw_user">用户消息模板</label>
+                        <textarea id="if_rw_user" class="text_pole if-textarea" rows="4"
+                                  placeholder="留空 = 使用内置模板"></textarea>
+                        <small class="if-hint">
+                            可用占位符：<code>{{char}}</code> <code>{{user}}</code> <code>{{story}}</code>
+                            <code>{{index}}</code> <code>{{count}}</code> <code>{{style}}</code>
+                        </small>
+
+                        <div class="if-actions">
+                            <button id="if_rw_defaults" class="menu_button">恢复默认提示词</button>
+                            <button id="if_rw_test" class="menu_button">测试重写</button>
+                        </div>
+
+                        <pre id="if_rw_result" class="if-rewrite-result"></pre>
+                    </div>
+                </div>
+            </div>
 
             <label for="if_position">图片插入位置</label>
             <select id="if_position" class="text_pole">

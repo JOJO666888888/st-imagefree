@@ -15,6 +15,7 @@ export const IF_CLASS = 'if-figure';
 export const IF_ID_ATTR = 'data-if-id';
 export const IF_STATUS_ATTR = 'data-if-status';
 export const IF_SRC_ATTR = 'data-if-src';
+export const IF_ANCHOR_ATTR = 'data-if-anchor';
 export const IF_ACTION_ATTR = 'data-if-action';
 
 /** 允许作为「段」的标签：酒馆 markdown 渲染后正文基本是 <p>，其它主题偶尔用 <div>/<li> */
@@ -131,6 +132,174 @@ export function splitBlocks(mes) {
     return blocks;
 }
 
+// ─────────────────── 提示词重写（独立 API，不碰对话预设） ───────────────────
+
+/**
+ * 内置的重写规则。
+ *
+ * 这套规则原本只能写在预设里（让主模型边写正文边吐 `<local_img>` 标签），
+ * 结果是「换预设就失效」「正文被标签污染」。搬到插件侧之后，主模型只写正文，
+ * 重写由另一条 API 单独做，两边彻底解耦。
+ *
+ * 内容参考了主流中文卡预设里那套 SDXL 画面公式（主体/临时特征/环境/光影/景别），
+ * 但收敛成「一段正文 → 一条提示词」，不要求模型输出标签或列表。
+ */
+export const DEFAULT_REWRITE_SYSTEM = [
+    '你是一名文生图提示词工程师。用户会给你一段中文小说正文，你要把它转写成**一条**可直接喂给文生图模型的提示词。',
+    '',
+    '## 工作方式',
+    '1. 读完整段正文，只挑**一个**最值得定格的瞬间：画面清楚、主体明确、有动作或情绪的那一刻。',
+    '   不要把整段剧情塞进一张图，也不要把几个不相干的场景拼在一起。',
+    '2. 把这一刻写成画面，依次交代：主体（性别、年龄段、发型发色、瞳色、体型、服装）→ 动作与表情 →',
+    '   环境与道具 → 光线与氛围 → 镜头（景别、角度、景深）→ 画风。',
+    '3. 画面里超过一个人时，写清楚谁在前景、谁在背景、各自在做什么，避免肢体糊成一团。',
+    '4. 角色外貌只写一遍、写具体；同一角色前后要一致。',
+    '',
+    '## 输出规则（严格遵守）',
+    '- 只输出一行提示词。不要解释、不要编号、不要引号、不要 Markdown、不要「提示词：」这类前缀、',
+    '  不要任何 XML 或尖括号标签。',
+    '- 用英文写，逗号分隔的短语或短句，可以有 1~2 个完整句子。',
+    '- 长度 25~60 个英文单词。宁可少写，也不要堆互相矛盾的形容词。',
+    '- 不要写画质词（masterpiece、best quality、8k 之类）—— 画质与画风由用户配置的「风格后缀」统一追加。',
+    '- 不要出现文字、水印、签名、logo、边框，也不要写多余的手指、重复肢体。',
+    '- 如果正文是纯对话或纯心理活动，就画「说话的人此刻的样子」：姿势、表情、所在环境。',
+    '',
+    '只输出那一行提示词。',
+].join('\n');
+
+/** 默认的用户消息模板；可用 {{char}} {{user}} {{story}} {{index}} {{count}} {{style}} */
+export const DEFAULT_REWRITE_USER = [
+    '【角色】{{char}}',
+    '【正文】',
+    '{{story}}',
+    '',
+    '按规则输出这一张的提示词（第 {{index}}/{{count}} 张）。',
+].join('\n');
+
+/**
+ * 去掉正文里残留的生图标签。
+ *
+ * 用户可能还在别的预设下沿用 `<local_img>…</local_img>` / `<image>…</image>` /
+ * `image###…###` 那套写法；这些标签对重写模型是噪声，先摘掉再送过去。
+ */
+export function stripImageTags(text) {
+    return String(text ?? '')
+        .replace(/<local_img>[\s\S]*?<\/local_img>/gi, ' ')
+        .replace(/<image>[\s\S]*?<\/image>/gi, ' ')
+        .replace(/<images>[\s\S]*?<\/images>/gi, ' ')
+        .replace(/image###[\s\S]*?###/g, ' ')
+        .replace(/[ \t]{2,}/g, ' ');
+}
+
+/** 极简模板替换：{{name}} → vars.name，缺变量原样保留 */
+export function renderTemplate(tpl, vars = {}) {
+    return String(tpl ?? '').replace(/\{\{\s*([\w.]+)\s*\}\}/g, (m, key) => {
+        const v = vars[key];
+        return v === undefined || v === null ? m : String(v);
+    });
+}
+
+/**
+ * 组装重写请求的 messages。
+ * @returns {{role:string, content:string}[]}
+ */
+export function buildRewriteMessages({ system, userTemplate, vars = {} }) {
+    const sys = renderTemplate(system || DEFAULT_REWRITE_SYSTEM, vars).trim();
+    const user = renderTemplate(userTemplate || DEFAULT_REWRITE_USER, vars).trim();
+    const messages = [];
+    if (sys) messages.push({ role: 'system', content: sys });
+    messages.push({ role: 'user', content: user });
+    return messages;
+}
+
+/**
+ * 从重写模型的回复里抠出提示词。
+ *
+ * 现实里各家模型/网关的输出非常脏：思维链、代码块、JSON、`提示词：` 前缀、
+ * 甚至把 `<local_img>` 标签也照抄一遍。这里按「越像成品越优先」的顺序逐层剥。
+ *
+ * @returns {{prompt:string, anchor:string}} anchor 是模型指认的段落开头（可选，用于提高插图位置准确度）
+ */
+export function parseRewriteOutput(raw) {
+    let text = String(raw ?? '').trim();
+    if (!text) return { prompt: '', anchor: '' };
+
+    // 1. 思维链 / reasoning
+    text = text
+        .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, ' ')
+        .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, ' ')
+        // 模型可能照着老习惯把提示词包进标签：这里要的是「脱壳」而不是「连内容一起删」
+        .replace(/<local_img>([\s\S]*?)<\/local_img>/gi, '$1')
+        .replace(/<image>([\s\S]*?)<\/image>/gi, '$1')
+        .replace(/image###([\s\S]*?)###/g, '$1')
+        .trim();
+
+    // 2. 整体被包在代码块里 → 先脱一层
+    const fence = /^```[\w-]*\s*\n([\s\S]*?)\n?```$/.exec(text);
+    if (fence) text = fence[1].trim();
+    text = text.replace(/```[\s\S]*?```/g, ' ').trim();
+
+    // 3. JSON（允许前后有废话）
+    const jsonMatch = /\{[\s\S]*\}/.exec(text);
+    if (jsonMatch) {
+        try {
+            const obj = JSON.parse(jsonMatch[0]);
+            const p = obj.prompt ?? obj.prompt_en ?? obj.text ?? obj.tag ?? obj.tags;
+            if (typeof p === 'string' && p.trim()) {
+                return {
+                    prompt: finalizePrompt(p),
+                    anchor: typeof obj.anchor === 'string' ? obj.anchor.trim() : '',
+                };
+            }
+        } catch { /* 不是 JSON，继续走文本解析 */ }
+    }
+
+    // 4. 纯文本：去掉标签、前缀、引号，取第一条像样的行
+    text = stripImageTags(text).trim();
+
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    for (const raw of lines) {
+        const line = raw
+            .replace(/^[-*·•]\s*/, '')
+            .replace(/^(?:正向提示词|提示词|prompt|tags?)\s*[:：]\s*/i, '')
+            .trim();
+        if (line.length < 6) continue;
+        if (/^[#<>{}\[\]|]/.test(line)) continue;          // 标题、标签行
+        if (/^(?:说明|解释|注|注意|理由|解析|备注)[:：]/.test(line)) continue;
+        return { prompt: finalizePrompt(line), anchor: '' };
+    }
+
+    return { prompt: finalizePrompt(text), anchor: '' };
+}
+
+/** 收尾：去引号/多余空白/句末句号，压成一行 */
+function finalizePrompt(text) {
+    return String(text ?? '')
+        .replace(/\s*\r?\n\s*/g, ' ')
+        .replace(/^["'“”‘’「」『』\s]+|["'“”‘’「」『』\s]+$/g, '')
+        .replace(/\s{2,}/g, ' ')
+        .replace(/[，、；]+/g, (m) => (m === '，' ? ', ' : m))
+        .trim()
+        .slice(0, 600);
+}
+
+/**
+ * 把模型写的提示词和用户配置的风格后缀拼起来。
+ * 后缀放最后，避免模型自己写画质词时把主体挤出权重。
+ */
+export function composePrompt(base, style) {
+    const b = String(base ?? '').trim().replace(/[,\s]+$/, '');
+    const s = String(style ?? '').trim().replace(/^[,\s]+|[,\s]+$/g, '');
+    if (!b) return s;
+    if (!s) return b;
+    // 后缀里已经出现过的词就不重复追加
+    const lowerB = b.toLowerCase();
+    const extra = s.split(',').map((x) => x.trim()).filter(Boolean)
+        .filter((x) => !lowerB.includes(x.toLowerCase()));
+    return extra.length ? `${b}, ${extra.join(', ')}` : b;
+}
+
+
 /** 中文/英文都能用的二元组集合（不依赖分词器，纯字符级） */
 export function bigrams(text) {
     const set = new Set();
@@ -191,9 +360,11 @@ export function pickSceneBlock(blocks, maxChars = 400) {
  * @param {string} mes 正文
  * @param {string} prompt 出图提示词
  * @param {'auto'|'end'|'first'|'random'} position
+ * @param {string} [hint] 重写模型指认的段落原文（可选）。有它时优先按它落位 ——
+ *        模型知道「这一张画的是哪一段」，比拿提示词去反推段落更准。
  * @returns {{para:number, snippet:string}} 锚点：段序号 + 段首快照（快照用于刷新后重新定位）
  */
-export function chooseAnchor(mes, prompt, position = 'auto') {
+export function chooseAnchor(mes, prompt, position = 'auto', hint = '') {
     const blocks = splitBlocks(mes);
     if (!blocks.length) return { para: 0, snippet: '' };
 
@@ -211,6 +382,28 @@ export function chooseAnchor(mes, prompt, position = 'auto') {
     if (position === 'random') {
         const pick = usable[Math.floor(Math.random() * usable.length)];
         return anchorOf(pick);
+    }
+
+    // auto 模式：重写模型指认了段落就按它落位 —— 它知道「这一张画的是哪一段」
+    const hintText = normalizeText(hint || '');
+    if (hintText.length >= 6) {
+        const hintGrams = bigrams(hintText);
+        let hinted = null;
+        let hintedScore = 0;
+        for (const b of usable) {
+            const grams = bigrams(b.plain);
+            if (!grams.size) continue;
+            let hit = 0;
+            for (const g of hintGrams) {
+                if (grams.has(g)) hit++;
+            }
+            const score = hit / hintGrams.size;
+            if (score > hintedScore) {
+                hintedScore = score;
+                hinted = b;
+            }
+        }
+        if (hinted && hintedScore >= 0.55) return anchorOf(hinted);
     }
 
     // auto：跟提示词最像的那一段
@@ -346,6 +539,7 @@ export function createFigureElement(doc, item, { showCaption = false, size = 'me
     fig.setAttribute(IF_ID_ATTR, String(item.id));
     fig.setAttribute(IF_STATUS_ATTR, item.status || 'pending');
     fig.setAttribute(IF_SRC_ATTR, item.url || '');
+    fig.setAttribute(IF_ANCHOR_ATTR, anchorKey(item.anchor));
     if (item.swipe !== undefined) fig.setAttribute('data-if-swipe', String(item.swipe));
     if (size) fig.setAttribute('data-if-size', size);
 
@@ -430,16 +624,24 @@ export function syncFigures(mesText, items, { doc = globalThis.document, showCap
     for (const item of list) {
         const id = String(item.id);
         const src = item.url || '';
-        const existing = Array.from(mesText.children)
+        const wantAnchor = anchorKey(item.anchor);
+        let existing = Array.from(mesText.children)
             .find((c) => c.classList?.contains(IF_CLASS) && c.getAttribute(IF_ID_ATTR) === id);
 
         if (existing) {
-            if (existing.getAttribute(IF_STATUS_ATTR) !== item.status
+            // 锚点变了（比如重写模型后来指认了另一段）→ 拆掉重插，不能留在原地
+            if ((existing.getAttribute(IF_ANCHOR_ATTR) || '') !== wantAnchor) {
+                existing.remove();
+                stats.removed++;
+                existing = null;
+            } else if (existing.getAttribute(IF_STATUS_ATTR) !== item.status
                 || existing.getAttribute(IF_SRC_ATTR) !== src) {
                 existing.replaceWith(createFigureElement(doc, item, { showCaption, size }));
                 stats.updated++;
+                continue;
+            } else {
+                continue;
             }
-            continue;
         }
 
         const anchorEl = resolveAnchorElement(mesText, item.anchor);
@@ -449,6 +651,12 @@ export function syncFigures(mesText, items, { doc = globalThis.document, showCap
     }
 
     return stats;
+}
+
+/** 锚点指纹：用来判断「同一张图是不是被挪了段落」 */
+export function anchorKey(anchor) {
+    if (!anchor) return '';
+    return `${anchor.para ?? ''}|${String(anchor.snippet || '').slice(0, 40)}`;
 }
 
 /** 单测 / 调试用：把 figure 还原成「可断言的纯数据」 */

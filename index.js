@@ -41,17 +41,23 @@ import {
     IF_ACTION_ATTR,
     IF_CLASS,
     IF_ID_ATTR,
+    DEFAULT_REWRITE_SYSTEM,
+    DEFAULT_REWRITE_USER,
+    buildRewriteMessages,
     chooseAnchor,
     cleanPrompt,
+    composePrompt,
     normalizeText,
+    parseRewriteOutput,
     pickSceneBlock,
     splitBlocks,
+    stripImageTags,
     syncFigures,
 } from './core.js';
 
 const MODULE_NAME = 'imagefree';
 const LOG = '[ImageFree]';
-const VERSION = '2.0.0';
+const VERSION = '3.1.0';
 
 const defaultSettings = {
     enabled: true,
@@ -59,7 +65,8 @@ const defaultSettings = {
     apiKey: '',
     model: 'imagefree-1',
     aspect: '3:4',
-    mode: 'direct',            // direct=直接取正文 | llm=让对话模型写提示词
+    // direct=直接取正文 | rewrite=独立重写API | llm=主模型 quiet prompt（旧，会把预设卷进来）
+    mode: 'rewrite',
     interval: 1,               // 每 N 条 AI 回复出一张（1=每条都出）
     maxChars: 400,
     position: 'auto',          // auto=按剧情匹配 | end=楼层末尾 | first=开头 | random=随机
@@ -72,6 +79,26 @@ const defaultSettings = {
     timeoutSec: 180,
     retries: 2,
     debug: false,
+    // 独立的提示词重写 API —— 只干「正文 → 绘图提示词」这一件事，
+    // 不读对话预设、不占对话额度、不往聊天里塞任何东西。
+    promptApi: {
+        // dedicated = 下面这套地址/Key；main = 借用酒馆当前对话用的那条 API
+        source: 'dedicated',
+        profileId: '',         // main 模式下指定连接档案；留空 = 直接用「当前对话连接」
+        baseUrl: '',
+        apiKey: '',
+        model: '',
+        temperature: 0.7,
+        maxTokens: 300,
+        timeoutSec: 60,
+        retries: 1,
+        storyChars: 2400,
+        lang: 'en',            // en | zh
+        jsonMode: false,
+        style: 'masterpiece, best quality, highly detailed, sharp focus',
+        system: '',            // 空 = 用 core.js 里的内置规则
+        user: '',              // 空 = 用内置模板
+    },
     llmInstruction:
         '你是一个 AI 绘图提示词生成器。读下面的剧情片段，提炼出一个具体的画面：' +
         '写清楚主体、外貌、动作、服装、场景、光线、镜头与画风。' +
@@ -84,6 +111,7 @@ const defaultSettings = {
 const inflight = new Map();
 let intervalCounter = 0;
 let quietDepth = 0;
+let rewriteWarned = false;
 let hydrating = false;
 let observer = null;
 let scheduled = false;
@@ -102,11 +130,25 @@ function getSettings() {
     for (const [k, v] of Object.entries(defaultSettings)) {
         if (s[k] === undefined) s[k] = v;
     }
+    // promptApi 是嵌套对象，得单独补子字段
+    if (!s.promptApi || typeof s.promptApi !== 'object') {
+        s.promptApi = structuredClone(defaultSettings.promptApi);
+    }
+    for (const [k, v] of Object.entries(defaultSettings.promptApi)) {
+        if (s.promptApi[k] === undefined) s.promptApi[k] = v;
+    }
     // v1 的默认 interval=2 是「隔一条出一张」，很多用户以为坏了。v2 只在
     // 用户没手动改过（仍等于旧默认 2）且没迁移过时，改回 1。
     if (!s.v2Migrated) {
         if (Number(s.interval) === 2) s.interval = 1;
         s.v2Migrated = true;
+        saveSettingsDebounced();
+    }
+    // v3：重写逻辑从预设搬到插件侧，默认走独立 API；没配地址时 buildPrompt
+    // 会自动回退到「直接取正文」，不会把出图中断。
+    if (!s.v3Migrated) {
+        s.mode = 'rewrite';
+        s.v3Migrated = true;
         saveSettingsDebounced();
     }
     return s;
@@ -177,6 +219,8 @@ function bindSettingsUI() {
     bindCheck('#if_show_caption', 'showCaption', () => hydrateAll('caption-toggle'));
     bindCheck('#if_debug', 'debug');
 
+    bindRewriteUI(s);
+
     $('#if_test').on('click', async function () {
         const btn = $(this);
         btn.prop('disabled', true).text('测试中…');
@@ -211,6 +255,150 @@ function applyCssVars() {
     const map = { small: '180px', medium: '300px', large: '440px', full: '100%' };
     const w = map[settings().displaySize] || map.medium;
     document.documentElement.style.setProperty('--if-img-max', w);
+}
+
+// ─────────────────── 重写 API 的设置界面 ───────────────────
+
+function bindRewriteUI(s) {
+    const api = s.promptApi;
+    const setVal = (id, val) => { const el = $(id); if (el.length) el.val(val); };
+
+    setVal('#if_rw_source', api.source || 'dedicated');
+    refreshProfileOptions(api.profileId);
+    applyRewriteSourceUI();
+    setVal('#if_rw_base', api.baseUrl);
+    setVal('#if_rw_key', api.apiKey);
+    setVal('#if_rw_model', api.model);
+    setVal('#if_rw_temp', api.temperature);
+    setVal('#if_rw_maxtok', api.maxTokens);
+    setVal('#if_rw_timeout', api.timeoutSec);
+    setVal('#if_rw_retries', api.retries);
+    setVal('#if_rw_story', api.storyChars);
+    setVal('#if_rw_lang', api.lang);
+    setVal('#if_rw_style', api.style);
+    setVal('#if_rw_system', api.system || DEFAULT_REWRITE_SYSTEM);
+    setVal('#if_rw_user', api.user || DEFAULT_REWRITE_USER);
+    $('#if_rw_json').prop('checked', !!api.jsonMode);
+
+    const bindText = (sel, key, transform) => $(sel).on('input', function () {
+        const v = String($(this).val());
+        api[key] = transform ? transform(v) : v;
+        saveSettingsDebounced();
+    });
+    const bindNum = (sel, key, min, max) => $(sel).on('input', function () {
+        const n = Number($(this).val());
+        api[key] = Math.min(max, Math.max(min, Number.isFinite(n) ? n : min));
+        saveSettingsDebounced();
+    });
+
+    $('#if_rw_source').on('change', function () {
+        api.source = String($(this).val()) === 'main' ? 'main' : 'dedicated';
+        saveSettingsDebounced();
+        applyRewriteSourceUI();
+    });
+    $('#if_rw_profile').on('change', function () {
+        api.profileId = String($(this).val() || '');
+        saveSettingsDebounced();
+    });
+    $('#if_rw_profiles').on('click', () => {
+        refreshProfileOptions(api.profileId);
+        toastr.success('连接列表已刷新', 'ImageFree');
+    });
+
+    bindText('#if_rw_base', 'baseUrl', (v) => v.trim().replace(/\/+$/, ''));
+    bindText('#if_rw_key', 'apiKey', (v) => v.trim());
+    bindText('#if_rw_model', 'model', (v) => v.trim());
+    bindText('#if_rw_style', 'style', (v) => v.trim());
+    bindText('#if_rw_system', 'system', (v) => v.trim());
+    bindText('#if_rw_user', 'user', (v) => v.trim());
+    bindNum('#if_rw_temp', 'temperature', 0, 2);
+    bindNum('#if_rw_maxtok', 'maxTokens', 64, 4000);
+    bindNum('#if_rw_timeout', 'timeoutSec', 10, 300);
+    bindNum('#if_rw_retries', 'retries', 0, 2);
+    bindNum('#if_rw_story', 'storyChars', 200, 8000);
+    $('#if_rw_lang').on('change', function () {
+        api.lang = String($(this).val());
+        saveSettingsDebounced();
+    });
+    $('#if_rw_json').on('change', function () {
+        api.jsonMode = $(this).prop('checked');
+        saveSettingsDebounced();
+    });
+
+    $('#if_rw_defaults').on('click', () => {
+        api.system = '';
+        api.user = '';
+        setVal('#if_rw_system', DEFAULT_REWRITE_SYSTEM);
+        setVal('#if_rw_user', DEFAULT_REWRITE_USER);
+        saveSettingsDebounced();
+        toastr.success('已恢复内置重写规则（清空输入框同样生效）', 'ImageFree');
+    });
+
+    $('#if_rw_test').on('click', () => { void runRewriteTest(); });
+}
+
+/** 「复用主 API」时按需显示连接档案下拉，专用 API 时显示地址/Key/模型 */
+function applyRewriteSourceUI() {
+    const isMain = (settings().promptApi.source || 'dedicated') === 'main';
+    $('#if_rw_main_box').toggleClass('if-hidden', !isMain);
+    $('#if_rw_dedicated_box').toggleClass('if-hidden', isMain);
+}
+
+/** 把酒馆「连接管理器」里的档案填进下拉框（第一项永远是「当前对话连接」） */
+function refreshProfileOptions(selected = '') {
+    const sel = $('#if_rw_profile');
+    if (!sel.length) return;
+    sel.find('option').slice(1).remove();
+
+    let profiles = [];
+    try {
+        profiles = getContext().extensionSettings?.connectionManager?.profiles || [];
+    } catch (e) {
+        dbg('读取连接档案失败', e);
+    }
+    for (const p of profiles) {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name || `${p.api || '?'} / ${p.model || '?'}`;
+        sel.append(opt);
+    }
+    sel.val(selected && profiles.some((p) => p.id === selected) ? selected : '');
+    dbg(`连接档案 ${profiles.length} 条`);
+}
+
+async function runRewriteTest() {
+    const box = $('#if_rw_result');
+    const btn = $('#if_rw_test');
+    btn.prop('disabled', true).text('重写中…');
+    box.text('正在请求重写 API…');
+
+    const t0 = Date.now();
+    try {
+        const ctx = getContext();
+        let source = '';
+        for (let i = (ctx.chat?.length ?? 0) - 1; i >= 0; i--) {
+            const m = ctx.chat[i];
+            if (!m.is_user && !m.is_system && normalizeText(m.mes)) { source = m.mes; break; }
+        }
+        if (!source) {
+            source = '雨下了整夜。林晚站在旧书店门口，抬手把伞往他那边偏了偏，'
+                + '霓虹灯的光落在她半边脸上，睫毛上挂着细小的水珠。他低头看她，什么也没说。';
+        }
+
+        const out = await rewritePrompt({ mes: source, name: ctx.name2 || '角色' }, { index: 1, count: 1 });
+        const sec = ((Date.now() - t0) / 1000).toFixed(1);
+        box.text(
+            `✅ ${sec}s\n\n【提示词】\n${out.prompt}\n\n`
+            + `【段落线索】${out.anchorHint || '（模型没给，插件会按语义自己找段）'}\n\n`
+            + `【模型原始返回】\n${out.raw}`,
+        );
+        toastr.success(`重写成功（${sec}s）`, 'ImageFree');
+    } catch (e) {
+        box.text(`❌ ${e.message}`);
+        toastr.error(`重写失败：${e.message}`, 'ImageFree');
+    } finally {
+        btn.prop('disabled', false).text('测试重写');
+    }
 }
 
 // ─────────────────────────── 存储（随聊天存档） ───────────────────────────
@@ -392,14 +580,263 @@ async function uploadToTavern(b64, messageId) {
     return data.path;
 }
 
+// ─────────────────────── 提示词重写（独立 API） ───────────────────────
+
+/**
+ * 为什么单独走一条 API：
+ * 之前「让模型写提示词」只能用酒馆的 quiet prompt —— 它跑的是**当前对话预设**，
+ * 于是重写规则只能塞进预设里（`<local_img>` 那套），换预设就失效，还会污染正文。
+ * 这里直连一个 OpenAI 兼容的 chat/completions，用自己的 system prompt，
+ * 与预设、与聊天上下文完全无关。
+ */
+
+function chatCompletionsUrl(base) {
+    const b = String(base || '').trim().replace(/\/+$/, '');
+    if (!b) return '';
+    if (/\/chat\/completions$/i.test(b)) return b;
+    return `${b}/chat/completions`;
+}
+
+function rewriteSystemPrompt(api) {
+    const base = String(api.system || '').trim() || DEFAULT_REWRITE_SYSTEM;
+    if (api.lang === 'zh') {
+        return `${base}\n\n补充：这次请用**中文**写那一行提示词（用中文逗号分隔的短语），不要输出英文。`;
+    }
+    return base;
+}
+
+/** 正文清洗：摘掉残留的生图标签，保留段落结构，按配置截断 */
+function storyForRewrite(mes) {
+    const limit = Math.max(200, Number(settings().promptApi.storyChars) || 2400);
+    return stripImageTags(String(mes ?? ''))
+        .replace(/\r\n/g, '\n')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
+        .slice(0, limit);
+}
+
+/**
+ * 借用「主 API」跑一次重写。
+ *
+ * 两条路：
+ *   1. 指定了连接档案（profileId）→ 走 ConnectionManagerRequestService，
+ *      用那条档案的 base/key/model，但 **includePreset: false**，不吃档案自带的预设；
+ *   2. 没指定 → 走「当前对话连接」：把 oai_settings 里的 source/model/custom_url
+ *      原样交给酒馆自己的 /api/backends/chat-completions/generate。
+ *      Key 始终在酒馆服务端，插件读不到也不需要读。
+ *
+ * 两条都不碰对话上下文、不写聊天记录 —— 只是借一条通道。
+ */
+async function callViaMainApi(messages, signal) {
+    const api = settings().promptApi;
+    const ctx = getContext();
+    const maxTokens = Math.max(64, Number(api.maxTokens) || 300);
+    const temperature = Number(api.temperature ?? 0.7);
+
+    // ① 指定了连接档案
+    if (api.profileId) {
+        const svc = ctx.ConnectionManagerRequestService;
+        if (!svc) throw new Error('酒馆没有加载「连接管理器」，请换回专用 API 或先在酒馆里启用它');
+        const prompt = svc.constructPrompt(messages, api.profileId);
+        const out = await svc.sendRequest(api.profileId, prompt, maxTokens, {
+            stream: false,
+            signal,
+            extractData: true,
+            includePreset: false,     // 关键：不套用档案里的预设
+            includeInstruct: false,
+        }, { temperature });
+        return String(out?.content ?? '');
+    }
+
+    // ② 当前对话连接
+    if (ctx.mainApi && ctx.mainApi !== 'openai') {
+        throw new Error('当前对话用的不是 Chat Completion 接口，复用主 API 暂不支持；请改用「专用 API」或指定一个连接档案');
+    }
+    const svc = ctx.ChatCompletionService;
+    if (!svc) throw new Error('酒馆没有暴露 ChatCompletionService，无法复用主 API');
+
+    const o = ctx.chatCompletionSettings || {};
+    if (!o.chat_completion_source) throw new Error('读不到当前对话的 API 设置');
+
+    const payload = {
+        stream: false,
+        messages,
+        model: o.openai_model,
+        chat_completion_source: o.chat_completion_source,
+        max_tokens: maxTokens,
+        temperature,
+        custom_url: o.custom_url || undefined,
+        reverse_proxy: o.reverse_proxy || undefined,
+        proxy_password: o.proxy_password || undefined,
+        custom_prompt_post_processing: o.custom_prompt_post_processing || undefined,
+        use_sysprompt: true,
+    };
+    const out = await svc.sendRequest(payload, true, signal);
+    return String(out?.content ?? '');
+}
+
+async function callRewriteApi(messages, signal) {
+    const api = settings().promptApi;
+    if (api.source === 'main') {
+        const text = await callViaMainApi(messages, signal);
+        if (!text.trim()) throw new Error('主 API 没有返回内容');
+        return text;
+    }
+
+    const url = chatCompletionsUrl(api.baseUrl);
+    if (!url) throw new Error('未配置「提示词重写 API」地址');
+    if (!api.model) throw new Error('未配置重写模型名');
+
+    const timeoutMs = Math.max(10, Number(api.timeoutSec) || 60) * 1000;
+    const ctl = new AbortController();
+    const abortAll = () => ctl.abort();
+    signal?.addEventListener('abort', abortAll, { once: true });
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+
+    const body = {
+        model: api.model,
+        messages,
+        temperature: Number(api.temperature ?? 0.7),
+        max_tokens: Math.max(64, Number(api.maxTokens) || 300),
+        stream: false,
+    };
+    // 只有明确开了 JSON 模式才发，某些网关不认这个字段会直接 400
+    if (api.jsonMode) body.response_format = { type: 'json_object' };
+
+    let resp;
+    try {
+        resp = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(api.apiKey ? { Authorization: `Bearer ${api.apiKey}` } : {}),
+            },
+            body: JSON.stringify(body),
+            signal: ctl.signal,
+        });
+    } catch (e) {
+        if (signal?.aborted) throw new Error('已取消');
+        if (ctl.signal.aborted) throw new Error(`重写超时（>${Math.round(timeoutMs / 1000)}s 无响应）`);
+        throw new Error(`连不上重写 API（${e.message}）。检查地址、网络、以及 https 页面调 http 接口的问题`);
+    } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abortAll);
+    }
+
+    if (!resp.ok) {
+        let detail = `HTTP ${resp.status}`;
+        try {
+            const err = await resp.json();
+            detail = err?.error?.message || err?.message || detail;
+        } catch { /* 非 JSON 错误体 */ }
+        if (resp.status === 401 || resp.status === 403) detail += ' —— 重写 API 的 Key 不对或没有权限';
+        if (resp.status === 404) detail += ' —— 路径不对，一般是 base 少写或多写了 /v1';
+        throw new Error(`重写 API 返回 ${detail}`);
+    }
+
+    const data = await resp.json();
+    const choice = data?.choices?.[0];
+    const content = choice?.message?.content ?? choice?.text ?? '';
+    const text = Array.isArray(content)
+        ? content.map((part) => part?.text || '').join('')
+        : String(content || '');
+    if (!text.trim()) throw new Error('重写 API 没返回内容（检查模型名是否支持 chat/completions）');
+    return text;
+}
+
+async function callRewriteWithRetry(messages, signal) {
+    const attempts = Math.max(1, Math.min(3, (Number(settings().promptApi.retries) || 0) + 1));
+    let lastErr = null;
+    for (let i = 1; i <= attempts; i++) {
+        try {
+            return await callRewriteApi(messages, signal);
+        } catch (e) {
+            lastErr = e;
+            const msg = e?.message || '';
+            const fatal = signal?.aborted || /已取消/.test(msg) || /\b(4\d\d)\b|超时/.test(msg);
+            if (fatal || i === attempts) break;
+            console.warn(LOG, `重写第 ${i}/${attempts} 次失败，1.5 秒后重试：${msg}`);
+            await new Promise((r) => setTimeout(r, 1500));
+        }
+    }
+    throw lastErr || new Error('重写失败');
+}
+
+/**
+ * 正文 → 一条绘图提示词。
+ * @returns {Promise<{prompt:string, anchorHint:string, raw:string}>}
+ */
+async function rewritePrompt(message, { index = 1, count = 1, signal } = {}) {
+    const api = settings().promptApi;
+    const ctx = getContext();
+    const story = storyForRewrite(message?.mes);
+    if (!story) throw new Error('本楼没有可用的正文');
+
+    const vars = {
+        char: ctx.name2 || message?.name || '',
+        user: ctx.name1 || '',
+        story,
+        index,
+        count,
+        style: api.style || '',
+    };
+    const messages = buildRewriteMessages({
+        system: rewriteSystemPrompt(api),
+        userTemplate: api.user || DEFAULT_REWRITE_USER,
+        vars,
+    });
+
+    const raw = await callRewriteWithRetry(messages, signal);
+    const parsed = parseRewriteOutput(raw);
+    if (!parsed.prompt || parsed.prompt.length < 6) {
+        throw new Error(`重写结果不像提示词：${String(raw).slice(0, 80)}`);
+    }
+    return {
+        prompt: composePrompt(parsed.prompt, api.style),
+        anchorHint: parsed.anchor,
+        raw,
+    };
+}
+
 // ─────────────────────────── 提示词 ───────────────────────────
 
-async function buildPrompt(message) {
+/**
+ * 产出这一张图要用的提示词。
+ *
+ * @returns {Promise<{prompt:string, anchorHint:string, source:'rewrite'|'llm'|'direct'}>}
+ *
+ * 三种来源的优先级就是 mode：
+ *   rewrite → 独立重写 API（推荐，不碰预设）
+ *   llm     → 酒馆 quiet prompt（旧方案，会跑当前预设，仅作兼容保留）
+ *   direct  → 直接截正文
+ * rewrite / llm 失败都会静默回退到 direct，保证「图一定出得来」。
+ */
+async function buildPrompt(message, { index = 1, count = 1, signal } = {}) {
     const s = settings();
     const blocks = splitBlocks(message.mes);
     const fallbackBlock = pickSceneBlock(blocks, s.maxChars);
     const fallback = cleanPrompt(fallbackBlock?.plain || normalizeText(message.mes), s.maxChars);
     if (!fallback) throw new Error('本楼没有可用正文');
+
+    if (s.mode === 'rewrite') {
+        try {
+            const out = await rewritePrompt(message, { index, count, signal });
+            dbg(`重写完成（${out.prompt.length} 字）`, out.prompt);
+            return { prompt: out.prompt, anchorHint: out.anchorHint, source: 'rewrite' };
+        } catch (e) {
+            if (signal?.aborted) throw e;
+            const msg = e?.message || String(e);
+            console.warn(LOG, `提示词重写失败，回退到直接取正文：${msg}`);
+            lastErrors.unshift({ at: new Date().toLocaleTimeString(), message: `重写失败：${msg}` });
+            lastErrors.splice(8);
+            // 只在配置缺失时提示一次，避免每楼都弹
+            if (!rewriteWarned && /未配置/.test(msg)) {
+                rewriteWarned = true;
+                toastr.info('还没配置「提示词重写 API」，先用正文直出。设置里填好地址和模型即可。', 'ImageFree');
+            }
+        }
+    }
 
     if (s.mode === 'llm') {
         quietDepth++;
@@ -410,7 +847,7 @@ async function buildPrompt(message) {
                 responseLength: 160,
             });
             const cleaned = cleanPrompt(raw, 400);
-            if (cleaned.length >= 6) return cleaned;
+            if (cleaned.length >= 6) return { prompt: cleaned, anchorHint: '', source: 'llm' };
             console.warn(LOG, 'LLM 写的提示词太短，回退到正文模式');
         } catch (e) {
             console.warn(LOG, 'LLM 写提示词失败，回退到正文模式：', e);
@@ -418,7 +855,8 @@ async function buildPrompt(message) {
             quietDepth--;
         }
     }
-    return fallback;
+
+    return { prompt: fallback, anchorHint: '', source: 'direct' };
 }
 
 // ─────────────────────────── 内联渲染（水合） ───────────────────────────
@@ -634,15 +1072,20 @@ async function runGeneration(messageId, item, key) {
     inflight.set(key, controller);
     const t0 = Date.now();
 
+    // 同一楼配多张时，让重写模型知道这是第几张，避免几张都画同一个瞬间
+    const count = Math.max(1, Math.min(4, Number(settings().perMessage) || 1));
+    const index = Math.max(1, itemsForSwipe(message, item.swipe).length);
+
     try {
-        const prompt = await buildPrompt(message);
+        const plan = await buildPrompt(message, { index, count, signal: controller.signal });
         if (controller.signal.aborted) throw new Error('已取消');
 
-        item.prompt = prompt;
-        item.anchor = chooseAnchor(message.mes, prompt, settings().position);
+        item.prompt = plan.prompt;
+        item.source = plan.source;
+        item.anchor = chooseAnchor(message.mes, plan.prompt, settings().position, plan.anchorHint);
         renderNow(messageId);
 
-        const res = await requestImageWithRetry(prompt, controller.signal);
+        const res = await requestImageWithRetry(plan.prompt, controller.signal);
         const url = res.b64 ? await uploadToTavern(res.b64, messageId) : res.url;
         if (controller.signal.aborted) throw new Error('已取消');
 
@@ -654,11 +1097,13 @@ async function runGeneration(messageId, item, key) {
 
         // 正文在生成期间可能被编辑/swipe 换掉，落盘前按最新正文再校一次锚点
         const fresh = getContext().chat?.[messageId];
-        if (fresh?.mes) item.anchor = chooseAnchor(fresh.mes, prompt, settings().position);
+        if (fresh?.mes) {
+            item.anchor = chooseAnchor(fresh.mes, plan.prompt, settings().position, plan.anchorHint);
+        }
 
         persist(messageId, chatId, item.id);
         renderNow(messageId);
-        console.info(LOG, `楼层 ${messageId} 出图完成 ${(item.ms / 1000).toFixed(1)}s`, prompt);
+        console.info(LOG, `楼层 ${messageId} 出图完成 ${(item.ms / 1000).toFixed(1)}s（${plan.source}）`, plan.prompt);
     } catch (e) {
         const aborted = controller.signal.aborted || /已取消/.test(e?.message || '');
         if (aborted) {
@@ -876,7 +1321,22 @@ function diagnose() {
 
     return {
         version: VERSION,
-        settings: { ...settings(), apiKey: settings().apiKey ? '***' : '' },
+        settings: (() => {
+            const s = settings();
+            const p = s.promptApi || {};
+            return {
+                ...s,
+                apiKey: s.apiKey ? '***' : '',
+                promptApi: {
+                    ...p,
+                    apiKey: p.apiKey ? '***' : '',
+                    // system/user 可能很长，诊断里只报长度和是否自定义
+                    system: p.system ? `(自定义 ${p.system.length} 字)` : '(内置)',
+                    user: p.user ? `(自定义 ${p.user.length} 字)` : '(内置)',
+                },
+            };
+        })(),
+        rewriteReady: !!(settings().promptApi?.baseUrl && settings().promptApi?.model),
         chatId: ctx.chatId ?? null,
         chatLength: chat.length,
         dom: { floors: domFloors, mesText: mesTextFloors, figures: domFigures, buttons },

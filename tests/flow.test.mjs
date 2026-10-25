@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { boot, makeMessage, mountMessage, remountText, settle, net, resetNet } from './harness.mjs';
-import { ctx } from './stub/extensions.js';
+import { ctx, mainApiMock } from './stub/extensions.js';
 import { eventSource, event_types, calls } from './stub/script.js';
 
 const env = await boot();
@@ -33,6 +33,14 @@ async function newChat() {
     ctx.chatId = `chat-${++chatSeq}`;
     ctx.chat = [];
     resetNet();
+    Object.assign(S().promptApi, {
+        source: 'dedicated', profileId: '',
+        baseUrl: '', apiKey: '', model: '', style: '', system: '', user: '',
+        lang: 'en', jsonMode: false, retries: 0, temperature: 0.7, maxTokens: 300,
+        timeoutSec: 60, storyChars: 2400,
+    });
+    mainApiMock.reset();
+    ctx.mainApi = 'openai';
     Object.assign(S(), {
         enabled: true,
         mode: 'direct',
@@ -309,13 +317,145 @@ test('诊断接口能给出可排障的快照', async () => {
     await receive(id);
 
     const info = globalThis.STImageFree.diagnose();
-    assert.equal(info.version, '2.0.0');
+    assert.match(info.version, /^\d+\.\d+\.\d+$/);
     assert.equal(info.chatLength, 1);
     assert.equal(info.dom.figures, 1);
     assert.equal(info.dom.mesText, 1);
     assert.equal(info.observer, true);
     assert.equal(info.messagesWithItems.length, 1);
     assert.equal(info.settings.apiKey, '');
+});
+
+// ── 独立重写 API ─────────────────────────────────────────
+
+test('rewrite 模式：提示词来自独立重写 API，主模型完全不参与', async () => {
+    await newChat();
+    S().mode = 'rewrite';
+    S().promptApi.baseUrl = 'http://127.0.0.1:9999/v1';
+    S().promptApi.model = 'rewrite-model';
+    S().promptApi.style = 'film grain, 35mm';
+    const quietBefore = calls.quiet;
+    const { msg, id } = pushAi(SCENE);
+    await receive(id);
+
+    const rw = net.calls.filter((c) => c.url.includes('/chat/completions'));
+    assert.equal(rw.length, 1, '应该调一次重写接口');
+    assert.equal(rw[0].url, 'http://127.0.0.1:9999/v1/chat/completions');
+    assert.equal(rw[0].body.model, 'rewrite-model');
+    assert.equal(rw[0].body.messages[0].role, 'system');
+    assert.ok(rw[0].body.messages[0].content.includes('文生图提示词'), 'system 应是内置重写规则');
+    assert.ok(rw[0].body.messages[1].content.includes('林晚站在街角'), 'user 消息要带上正文');
+
+    const item = items(msg)[0];
+    assert.equal(item.status, 'ready');
+    assert.equal(item.source, 'rewrite');
+    assert.equal(
+        item.prompt,
+        'silver-haired girl holding an umbrella under neon rain, cinematic, film grain, 35mm',
+        '最终提示词 = 模型输出 + 风格后缀',
+    );
+    assert.equal(calls.quiet, quietBefore, '绝不能再去动酒馆的 quiet prompt（那是预设耦合的根源）');
+});
+
+test('rewrite 失败：静默回退到直接取正文，图照样出', async () => {
+    await newChat();
+    S().mode = 'rewrite';
+    S().promptApi.baseUrl = 'http://127.0.0.1:9999/v1';
+    S().promptApi.model = 'rewrite-model';
+    net.rewriteFail = '上游 500';
+    const { msg, id } = pushAi(SCENE);
+    await receive(id);
+
+    const item = items(msg)[0];
+    assert.equal(item.status, 'ready', '重写挂了也要把图出来');
+    assert.equal(item.source, 'direct');
+    assert.ok(item.prompt.includes('林晚站在街角'));
+});
+
+test('未配置重写 API：不请求、不报错，直接回退', async () => {
+    await newChat();
+    S().mode = 'rewrite';           // 地址留空
+    const { msg, id } = pushAi(SCENE);
+    await receive(id);
+
+    assert.equal(net.calls.filter((c) => c.url.includes('/chat/completions')).length, 0);
+    assert.equal(items(msg)[0].status, 'ready');
+    assert.equal(items(msg)[0].source, 'direct');
+});
+
+test('重写给的段落线索会决定插图位置', async () => {
+    await newChat();
+    S().mode = 'rewrite';
+    S().promptApi.baseUrl = 'http://127.0.0.1:9999/v1';
+    S().promptApi.model = 'rewrite-model';
+    // 模型返回英文提示词（跟中文正文毫无字符重合），但指认了第三段
+    net.rewriteReply = JSON.stringify({
+        prompt: 'a man looking down at a woman in the rain, close-up',
+        anchor: '他低头看她，没说话。',
+    });
+    const { msg, id } = pushAi(SCENE);
+    await receive(id);
+
+    assert.equal(items(msg)[0].anchor.para, 2, '应该听模型的段落线索，而不是靠提示词猜');
+    const children = [...doc.querySelector(`.mes[mesid="${id}"] .mes_text`).children];
+    assert.equal(children.findIndex((c) => c.classList.contains('if-figure')), 3);
+});
+
+// ── 复用主 API ───────────────────────────────────────────
+
+test('复用主 API（当前对话连接）：走 ChatCompletionService，不填 Key 也能重写', async () => {
+    await newChat();
+    S().mode = 'rewrite';
+    S().promptApi.source = 'main';
+    S().promptApi.profileId = '';
+    S().promptApi.style = 'film grain';
+    const { msg, id } = pushAi(SCENE);
+    await receive(id);
+
+    assert.equal(mainApiMock.chatCalls.length, 1, '应调用一次当前对话连接');
+    const call = mainApiMock.chatCalls[0];
+    assert.equal(call.chat_completion_source, 'custom');
+    assert.equal(call.model, 'main-model');
+    assert.equal(call.custom_url, 'http://main.test/v1');
+    assert.equal(call.messages[0].role, 'system');
+    assert.ok(call.messages[1].content.includes('林晚站在街角'));
+
+    const item = items(msg)[0];
+    assert.equal(item.source, 'rewrite');
+    assert.equal(item.prompt, 'main api rewritten prompt, rainy street, film grain');
+    assert.equal(net.calls.filter((c) => c.url.includes('/chat/completions')).length, 0, '不该再打专用地址');
+});
+
+test('复用主 API（指定连接档案）：走 ConnectionManagerRequestService 且不吃预设', async () => {
+    await newChat();
+    S().mode = 'rewrite';
+    S().promptApi.source = 'main';
+    S().promptApi.profileId = 'p1';
+    const { msg, id } = pushAi(SCENE);
+    await receive(id);
+
+    assert.equal(mainApiMock.profileCalls.length, 1);
+    assert.equal(mainApiMock.profileCalls[0].profileId, 'p1');
+    assert.equal(mainApiMock.profileCalls[0].opts.includePreset, false, '必须忽略档案自带预设');
+    assert.equal(mainApiMock.chatCalls.length, 0, '指定档案后就不该再走当前连接');
+
+    const item = items(msg)[0];
+    assert.equal(item.source, 'rewrite');
+    assert.ok(item.prompt.startsWith('profile rewritten prompt'));
+});
+
+test('主 API 不是 Chat Completion 时给出明确报错并回退', async () => {
+    await newChat();
+    S().mode = 'rewrite';
+    S().promptApi.source = 'main';
+    ctx.mainApi = 'textgenerationwebui';
+    const { msg, id } = pushAi(SCENE);
+    await receive(id);
+
+    const item = items(msg)[0];
+    assert.equal(item.status, 'ready', '回退后图还是要出');
+    assert.equal(item.source, 'direct');
+    assert.equal(mainApiMock.chatCalls.length, 0);
 });
 
 test('楼层「配图」按钮：存在且可点', async () => {

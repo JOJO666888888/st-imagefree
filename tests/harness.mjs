@@ -24,6 +24,9 @@ export const net = {
     delayMs: 0,
     fail: null,          // 设成字符串则生成接口返回 500 + 该错误
     uploadSeq: 0,
+    rewriteReply: 'silver-haired girl holding an umbrella under neon rain, cinematic',
+    rewriteFail: null,   // 设成字符串则重写接口返回 500
+    rewriteDelayMs: 0,
 };
 
 function jsonResponse(obj, status = 200) {
@@ -48,6 +51,13 @@ function installFetch() {
                 return jsonResponse({ data: [{ b64_json: TINY_PNG }] });
             }
             return jsonResponse({ data: [{ url: 'https://example.test/remote.png' }] });
+        }
+        if (u.includes('/chat/completions')) {
+            if (net.rewriteDelayMs) await new Promise((r) => setTimeout(r, net.rewriteDelayMs));
+            if (net.rewriteFail) return jsonResponse({ error: { message: net.rewriteFail } }, 500);
+            return jsonResponse({
+                choices: [{ index: 0, message: { role: 'assistant', content: net.rewriteReply } }],
+            });
         }
         if (u.includes('/api/images/upload')) {
             const n = net.uploadSeq++;
@@ -152,6 +162,9 @@ export function resetNet() {
     net.calls.length = 0;
     net.delayMs = 0;
     net.fail = null;
+    net.rewriteFail = null;
+    net.rewriteDelayMs = 0;
+    net.rewriteReply = 'silver-haired girl holding an umbrella under neon rain, cinematic';
 }
 
 /** 造一条酒馆消息对象 */

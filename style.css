@@ -245,3 +245,46 @@
     flex: 1;
     min-width: 110px;
 }
+
+/* 重写 API 的输入区 / 结果预览 */
+.imagefree-settings .if-textarea {
+    font-family: var(--monoFontFamily, ui-monospace, SFMono-Regular, Consolas, monospace);
+    font-size: 0.8em;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    resize: vertical;
+    min-height: 60px;
+}
+
+.imagefree-settings .if-subdrawer .inline-drawer-content {
+    padding-left: 4px;
+}
+
+/* 通用隐藏（来源切换时用 toggleClass 控制） */
+.imagefree-settings .if-hidden {
+    display: none;
+}
+
+#if_rw_main_box,
+#if_rw_dedicated_box {
+    margin-top: 2px;
+}
+
+.imagefree-settings .if-rewrite-result {
+    max-height: 280px;
+    overflow: auto;
+    margin: 8px 0 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.3));
+    background: rgba(128, 128, 128, 0.08);
+    color: var(--SmartThemeBodyColor, inherit);
+    font-size: 0.78em;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.imagefree-settings .if-rewrite-result:empty {
+    display: none;
+}

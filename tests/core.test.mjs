@@ -206,3 +206,93 @@ test('createFigureElement：默认不显示提示词，开了才显示', () => {
     const b = core.createFigureElement(doc, { id: 'b', status: 'ready', url: '/b.png', prompt: '少女' }, { showCaption: true });
     assert.equal(b.querySelector('figcaption').textContent, '少女');
 });
+
+// ── 提示词重写（独立 API） ───────────────────────────────
+
+test('parseRewriteOutput：一行纯文本', () => {
+    const out = core.parseRewriteOutput('  a girl standing in the rain, neon lights, cinematic  ');
+    assert.equal(out.prompt, 'a girl standing in the rain, neon lights, cinematic');
+    assert.equal(out.anchor, '');
+});
+
+test('parseRewriteOutput：剥掉思维链与代码块', () => {
+    const raw = [
+        '<think>用户给了一段中文，我先分析……</think>',
+        '```text',
+        'silver hair girl, holding umbrella, rainy neon street, cinematic',
+        '```',
+    ].join('\n');
+    assert.equal(core.parseRewriteOutput(raw).prompt,
+        'silver hair girl, holding umbrella, rainy neon street, cinematic');
+});
+
+test('parseRewriteOutput：JSON 带 prompt / anchor', () => {
+    const raw = '结果如下：\n{"prompt":"two people under one umbrella, close-up, rain","anchor":"他低头看她"}';
+    const out = core.parseRewriteOutput(raw);
+    assert.equal(out.prompt, 'two people under one umbrella, close-up, rain');
+    assert.equal(out.anchor, '他低头看她');
+});
+
+test('parseRewriteOutput：中文前缀、说明行、残留标签都要清掉', () => {
+    const raw = [
+        '说明：我先挑了最有画面的一段。',
+        '提示词：林晚撑着伞站在霓虹雨夜，半身特写',
+        '（备注：已避开文字）',
+    ].join('\n');
+    const out = core.parseRewriteOutput(raw);
+    // 全角逗号会被规范成 ASCII 逗号：出图模型对逗号分隔更敏感
+    assert.equal(out.prompt, '林晚撑着伞站在霓虹雨夜, 半身特写');
+
+    const tagged = core.parseRewriteOutput('<local_img>girl in rain, umbrella</local_img>');
+    assert.equal(tagged.prompt, 'girl in rain, umbrella');
+});
+
+test('parseRewriteOutput：空输入', () => {
+    assert.deepEqual(core.parseRewriteOutput(''), { prompt: '', anchor: '' });
+    assert.deepEqual(core.parseRewriteOutput(null), { prompt: '', anchor: '' });
+});
+
+test('renderTemplate：占位符替换，缺变量原样留', () => {
+    const out = core.renderTemplate('{{char}}|{{story}}|{{index}}/{{count}}|{{nope}}', {
+        char: '林晚', story: '正文', index: 1, count: 2,
+    });
+    assert.equal(out, '林晚|正文|1/2|{{nope}}');
+});
+
+test('buildRewriteMessages：system + user 两条', () => {
+    const msgs = core.buildRewriteMessages({
+        system: '规则 {{char}}',
+        userTemplate: '{{story}}',
+        vars: { char: 'A', story: 'B' },
+    });
+    assert.equal(msgs.length, 2);
+    assert.deepEqual(msgs[0], { role: 'system', content: '规则 A' });
+    assert.deepEqual(msgs[1], { role: 'user', content: 'B' });
+});
+
+test('stripImageTags：摘掉各种残留标签', () => {
+    const src = '前文<local_img>girl, rain</local_img>中段<image>x</image>后段 image###y### 结尾';
+    const out = core.stripImageTags(src);
+    assert.equal(/local_img|<image>|image###/.test(out), false);
+    assert.ok(out.includes('前文'));
+    assert.ok(out.includes('结尾'));
+});
+
+test('composePrompt：追加风格后缀并去重', () => {
+    assert.equal(core.composePrompt('a, b', 'c, d'), 'a, b, c, d');
+    assert.equal(core.composePrompt('a, cinematic', 'cinematic, d'), 'a, cinematic, d');
+    assert.equal(core.composePrompt('a', ''), 'a');
+    assert.equal(core.composePrompt('', 'x'), 'x');
+});
+
+test('chooseAnchor(hint)：按模型指认的段落落位', () => {
+    const hint = '他低头看她，没说话。';
+    const anchor = core.chooseAnchor(SCENE, 'a close-up of a man looking down', 'auto', hint);
+    assert.equal(anchor.para, 2);
+
+    // 明确选了 end 时，hint 不该抢戏
+    const endAnchor = core.chooseAnchor(SCENE, 'a close-up', 'end', hint);
+    assert.equal(endAnchor.para, 2);
+    const firstAnchor = core.chooseAnchor(SCENE, 'a close-up', 'first', hint);
+    assert.equal(firstAnchor.para, 0);
+});
