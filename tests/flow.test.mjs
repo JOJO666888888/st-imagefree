@@ -44,6 +44,8 @@ async function newChat() {
     Object.assign(S(), {
         enabled: true,
         mode: 'direct',
+        trigger: 'auto',
+        marker: '[[配图]]',
         interval: 1,
         perMessage: 1,
         position: 'auto',
@@ -456,6 +458,196 @@ test('主 API 不是 Chat Completion 时给出明确报错并回退', async () =
     assert.equal(item.status, 'ready', '回退后图还是要出');
     assert.equal(item.source, 'direct');
     assert.equal(mainApiMock.chatCalls.length, 0);
+});
+
+test('重写失败降级：图上必须标「未重写」，并记下原因', async () => {
+    await newChat();
+    S().mode = 'rewrite';            // 地址留空 → 必失败
+    const { msg, id } = pushAi(SCENE);
+    await receive(id);
+
+    const item = items(msg)[0];
+    assert.equal(item.status, 'ready');
+    assert.equal(item.source, 'direct');
+    assert.equal(item.fallback, true, '要能标记出这是降级产物');
+    assert.ok(/未配置/.test(item.fallbackReason || ''), '要记下原因');
+
+    const fig = figEls(id)[0];
+    assert.equal(fig.getAttribute('data-if-source'), 'direct');
+    assert.ok(fig.querySelector('.if-figure__badge'), '没有重写就挂个「未重写」的标');
+});
+
+test('直接取正文时不能把 <local_img> 里的预设内容带进提示词', async () => {
+    await newChat();
+    S().mode = 'rewrite';
+    const withTag = [
+        '雨下了整夜。',
+        '林晚站在街角，抬手把伞往他那边偏了偏，霓虹落在她侧脸上。',
+        '<local_img>1girl, silver hair, masterpiece, best quality</local_img>',
+    ].join('\n\n');
+    const { msg, id } = pushAi(withTag);
+    await receive(id);
+
+    const prompt = items(msg)[0].prompt;
+    assert.ok(prompt.includes('林晚'), '正文该留下');
+    assert.equal(/1girl|silver hair|masterpiece/i.test(prompt), false,
+        '标签里的内容（往往是预设让模型写的提示词）必须被摘掉');
+});
+
+test('正常重写 / 直接模式都不挂「未重写」标', async () => {
+    await newChat();
+    S().mode = 'direct';
+    const a = pushAi(SCENE);
+    await receive(a.id);
+    assert.equal(figEls(a.id)[0].querySelector('.if-figure__badge'), null);
+    assert.equal(items(a.msg)[0].fallback, false);
+
+    await newChat();
+    S().mode = 'rewrite';
+    S().promptApi.baseUrl = 'http://127.0.0.1:9999/v1';
+    S().promptApi.model = 'rewrite-model';
+    const b = pushAi(SCENE);
+    await receive(b.id);
+    assert.equal(figEls(b.id)[0].querySelector('.if-figure__badge'), null);
+    assert.equal(items(b.msg)[0].source, 'rewrite');
+});
+
+// ── 标记驱动（v3.2） ─────────────────────────────────────
+
+const TAGGED = [
+    '雨下了整夜，屋檐的水线一直没断。',
+    '林晚站在旧书店门口，把伞往他那边偏了偏，霓虹落在她侧脸上。',
+    '[[配图]]',
+    '他低头看她，最终什么也没说。',
+].join('\n\n');
+
+test('标记驱动：没有标记的楼层一张图都不出', async () => {
+    await newChat();
+    S().trigger = 'tag';
+    const { msg, id } = pushAi(SCENE);          // SCENE 里没有标记
+    await receive(id);
+
+    assert.equal(items(msg).length, 0, '没有标记就不该有配图记录');
+    assert.equal(genCalls(), 0, '更不该去打生图接口');
+});
+
+test('标记驱动：问候语/空正文不触发出图', async () => {
+    await newChat();
+    S().trigger = 'tag';
+    const hello = pushAi('你好呀，今天想聊点什么？');
+    await receive(hello.id);
+    assert.equal(items(hello.msg).length, 0);
+    assert.equal(genCalls(), 0);
+});
+
+test('标记驱动：出了标记才出图，且图插在标记所在位置', async () => {
+    await newChat();
+    S().trigger = 'tag';
+    const { msg, id } = pushAi(TAGGED);
+    await receive(id);
+
+    const list = items(msg);
+    assert.equal(list.length, 1);
+    assert.equal(list[0].status, 'ready');
+    assert.equal(list[0].markerAt > 0, true, '要记下标记的位置');
+
+    // 标记在第 3 段（index 2），图应插在第 2 段之后
+    const kids = [...doc.querySelector(`.mes[mesid="${id}"] .mes_text`).children];
+    const figIndex = kids.findIndex((c) => c.classList.contains('if-figure'));
+    assert.equal(figIndex, 2, `图应紧跟第 2 段，实际 ${figIndex}`);
+    assert.equal(kids[figIndex - 1].textContent.includes('林晚站在旧书店门口'), true);
+
+    // 标记那一段要被藏起来，读者看不见 [[配图]]
+    const markerPara = kids.find((c) => c.textContent.includes('[[配图]]'));
+    assert.ok(markerPara, '标记段应还在 DOM 里（只是隐藏）');
+    assert.equal(markerPara.style.display, 'none', '标记段必须被隐藏');
+});
+
+test('标记驱动：重写给的是标记之前的正文，不含后面剧情', async () => {
+    await newChat();
+    S().trigger = 'tag';
+    S().mode = 'rewrite';
+    S().promptApi.baseUrl = 'http://127.0.0.1:9999/v1';
+    S().promptApi.model = 'rewrite-model';
+    const { msg, id } = pushAi(TAGGED);
+    await receive(id);
+
+    const rw = net.calls.filter((c) => c.url.includes('/chat/completions'))[0];
+    const userMsg = rw.body.messages[1].content;
+    assert.equal(userMsg.includes('林晚站在旧书店门口'), true, '标记前的正文要在');
+    assert.equal(userMsg.includes('他低头看她'), false, '标记后的剧情不该给重写模型');
+    assert.equal(userMsg.includes('[[配图]]'), false, '标记本身要去掉');
+    assert.equal(items(msg)[0].status, 'ready');
+});
+
+test('标记驱动：两个标记出两张，各自锚在自己的位置', async () => {
+    await newChat();
+    S().trigger = 'tag';
+    S().perMessage = 2;
+    const mes = [
+        '第一段：雨声很密。',
+        '[[配图]]',
+        '第二段：她把伞收了。',
+        '[[配图]]',
+        '第三段：他终于开口。',
+    ].join('\n\n');
+    const { msg, id } = pushAi(mes);
+    await receive(id);
+
+    const list = items(msg);
+    assert.equal(list.length, 2, '两个标记应该出两张');
+    const paras = list.map((i) => i.anchor.para).sort((a, b) => a - b);
+    assert.deepEqual(paras, [0, 2], '分别锚在第 1、第 3 段');
+    assert.equal(figEls(id).length, 2);
+});
+
+test('auto 模式不受标记限制（兼容老用法）', async () => {
+    await newChat();
+    S().trigger = 'auto';
+    const { msg, id } = pushAi(SCENE);
+    await receive(id);
+    assert.equal(items(msg).length, 1);
+    assert.equal(items(msg)[0].markerAt, null);
+});
+
+// ── 通道选择 / CORS 兜底 ─────────────────────────────────
+
+test('复用主 API 时，重写模型字段会覆盖酒馆里的对话模型', async () => {
+    await newChat();
+    S().mode = 'rewrite';
+    S().promptApi.source = 'main';
+    S().promptApi.profileId = '';
+    S().promptApi.model = 'spark-x2.6';       // 酒馆里是 main-model
+    const { msg, id } = pushAi(SCENE);
+    await receive(id);
+
+    assert.equal(mainApiMock.chatCalls.length, 1);
+    assert.equal(mainApiMock.chatCalls[0].model, 'spark-x2.6', '必须用插件里填的模型，否则会被上游 400');
+    assert.equal(items(msg)[0].source, 'rewrite');
+});
+
+test('专用 API 被 CORS 拦掉时，自动改走酒馆服务端通道', async () => {
+    await newChat();
+    S().mode = 'rewrite';
+    S().promptApi.source = 'dedicated';
+    S().promptApi.baseUrl = 'http://127.0.0.1:9999/v1';
+    S().promptApi.model = 'rewrite-model';
+    S().promptApi.style = '';
+
+    // 让浏览器直连表现成 CORS 失败
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+        if (String(url).includes('/chat/completions')) throw new TypeError('Failed to fetch');
+        return realFetch(url, init);
+    };
+    try {
+        const { msg, id } = pushAi(SCENE);
+        await receive(id);
+        assert.equal(mainApiMock.chatCalls.length, 1, '应自动退到服务端通道');
+        assert.equal(items(msg)[0].source, 'rewrite', '结果仍算重写成功');
+    } finally {
+        globalThis.fetch = realFetch;
+    }
 });
 
 test('楼层「配图」按钮：存在且可点', async () => {

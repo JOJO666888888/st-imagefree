@@ -15,6 +15,30 @@
                 （不是塞到楼层底部的图廊里）。
             </small>
 
+            <div id="if_rw_warn" class="if-warn-box if-hidden"></div>
+
+            <div class="if-row">
+                <div class="if-col">
+                    <label for="if_trigger">什么时候出图</label>
+                    <select id="if_trigger" class="text_pole">
+                        <option value="tag">正文里出现配图标记时（推荐）</option>
+                        <option value="auto">每条 AI 回复都自动配一张</option>
+                    </select>
+                </div>
+                <div class="if-col">
+                    <label for="if_marker">配图标记</label>
+                    <input type="text" id="if_marker" class="text_pole" placeholder="[[配图]]">
+                </div>
+            </div>
+            <small class="if-hint">
+                <b>标记触发</b>：写文模型在正文里单独写一行 <code>[[配图]]</code>，
+                插件检测到才出图，并把图插在那个位置、顺手把标记藏掉。<br>
+                这样开场白、纯对话、没有画面的段落<b>都不会触发出图</b>，
+                重写模型也一定能拿到标记<b>之前</b>的正文。<br>
+                需要配合专用世界书（仓库里 <code>worldbook/</code> 那个），
+                让写文模型知道要写这个标记。
+            </small>
+
             <hr>
 
             <label for="if_api_base">API 地址</label>
@@ -27,6 +51,18 @@
 
             <label for="if_model">模型名</label>
             <input type="text" id="if_model" class="text_pole" placeholder="imagefree-1">
+
+            <label for="if_img_transport">出图请求走哪边</label>
+            <select id="if_img_transport" class="text_pole">
+                <option value="auto">自动（浏览器优先，被 CORS 挡了就走服务端）</option>
+                <option value="browser">只走浏览器（中转必须开 CORS）</option>
+                <option value="server">只走服务端代理（需 imagefree-proxy 插件）</option>
+            </select>
+            <small class="if-hint">
+                出图中转没开 <code>Access-Control-Allow-Origin</code> 时，浏览器直接请求会
+                <code>Failed to fetch</code>（酒馆自己走服务端所以写文正常）。
+                「自动」会用酒馆服务端插件 <code>plugins/imagefree-proxy</code> 转发，绕开 CORS。
+            </small>
 
             <div class="if-row">
                 <div class="if-col">
@@ -122,14 +158,25 @@
                             </div>
                             <div class="if-col">
                                 <label for="if_rw_maxtok">最大 tokens</label>
-                                <input type="number" id="if_rw_maxtok" class="text_pole" min="64" max="4000" step="32">
+                                <input type="number" id="if_rw_maxtok" class="text_pole" min="64" max="1000000" step="1000">
+                            </div>
+                            <div class="if-col">
+                                <label for="if_rw_promptcap">提示词上限（字）</label>
+                                <input type="number" id="if_rw_promptcap" class="text_pole" min="80" max="4000" step="20">
                             </div>
                         </div>
+                        <small class="if-hint">
+                            <b>最大 tokens</b>：给重写模型的输出额度。推理模型会先花在思考上，
+                            默认 320000，理论上限 100 万。<br>
+                            <b>正文上限</b>：喂给重写模型的剧情字数，默认 2 万，按你的上下文上限给（可到 100 万）。<br>
+                            <b>提示词上限</b>：只管最终那一句提示词的长度（防止模型把剧情复述给你），
+                            不是模型输出上限 —— 生图模型对超长提示词并不更准，800 左右最稳。
+                        </small>
 
                         <div class="if-row">
                             <div class="if-col">
                                 <label for="if_rw_timeout">超时（秒）</label>
-                                <input type="number" id="if_rw_timeout" class="text_pole" min="10" max="300" step="5">
+                                <input type="number" id="if_rw_timeout" class="text_pole" min="10" max="600" step="5">
                             </div>
                             <div class="if-col">
                                 <label for="if_rw_retries">失败重试</label>
@@ -137,7 +184,7 @@
                             </div>
                             <div class="if-col">
                                 <label for="if_rw_story">正文上限（字）</label>
-                                <input type="number" id="if_rw_story" class="text_pole" min="200" max="8000" step="200">
+                                <input type="number" id="if_rw_story" class="text_pole" min="200" max="1000000" step="1000">
                             </div>
                         </div>
 
@@ -213,7 +260,7 @@
             <div class="if-row">
                 <div class="if-col">
                     <label for="if_maxchars">正文截取字数</label>
-                    <input type="number" id="if_maxchars" class="text_pole" min="80" max="2000" step="20">
+                    <input type="number" id="if_maxchars" class="text_pole" min="80" max="8000" step="20">
                 </div>
                 <div class="if-col">
                     <label for="if_timeout">超时（秒）</label>

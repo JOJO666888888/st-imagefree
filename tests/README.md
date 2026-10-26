@@ -12,13 +12,13 @@ npm install          # 只装 jsdom + jquery，约 30MB，装在本目录的 nod
 npm test             # = node --test core.test.mjs flow.test.mjs
 ```
 
-预期：`# pass 52  # fail 0`。
+预期：`# pass 58  # fail 0`。
 
 ## 两个文件测什么
 
 | 文件 | 覆盖 |
 |---|---|
-| `core.test.mjs` | 切段（空行/单换行/代码块）、提示词清洗、段落相似度选锚点、段号漂移后靠快照复位、同段多图排序、差分水合幂等；重写侧：`parseRewriteOutput` 各种脏输出（think/代码块/JSON/中文前缀/残留标签）、模板替换、标签剥离、风格后缀去重、按模型给的行索落位 |
+| `core.test.mjs` | 切段（空行/单换行/代码块）、提示词清洗、段落相似度选锚点、段号漂移后靠快照复位、同段多图排序、差分水合幂等；重写侧：`parseRewriteOutput` 各种脏输出（think/代码块/JSON/中文前缀/开场白/残留标签）、`capPrompt` 超长按标点截断、模板替换、标签剥离、风格后缀去重、按模型给的行索落位 |
 | `flow.test.mjs` | MESSAGE_RECEIVED 自动触发、图片内联位置、`.mes_text` 被重写后自愈、不重复出图、interval、user/system/quiet 过滤、swipe 独立成图、删除/重试按钮、失败自动重试、position=end、perMessage 上限、llm 模式、不走 extra.media；外加独立重写 API 的四条：走 rewrite 且不碰主模型、失败回退 direct、未配置回退、按 anchor 落位；以及复用主 API 的三条：当前连接透传、指定档案不吃预设、非 Chat Completion 时回退 |
 
 ## 注意

@@ -285,6 +285,21 @@ test('composePrompt：追加风格后缀并去重', () => {
     assert.equal(core.composePrompt('', 'x'), 'x');
 });
 
+test('cleanBlocksForPrompt：标签连内容一起摘掉，段号不变', () => {
+    const mes = [
+        '雨下了整夜。',
+        '林晚站在街角，抬手把伞往他那边偏了偏。',
+        '<local_img>1girl, silver hair, holding umbrella, masterpiece</local_img>',
+        '他低头看她，没说话。',
+    ].join('\n\n');
+    const blocks = core.cleanBlocksForPrompt(core.splitBlocks(mes));
+    assert.equal(blocks.length, 4);
+    assert.equal(blocks[2].skip, true, '整块都是标签，清完应该被跳过');
+    assert.equal(blocks[2].plain, '');
+    assert.ok(blocks[1].plain.includes('林晚站在街角'));
+    assert.equal(blocks[1].index, 1, 'index 不能被改，DOM 段号要对得上');
+});
+
 test('chooseAnchor(hint)：按模型指认的段落落位', () => {
     const hint = '他低头看她，没说话。';
     const anchor = core.chooseAnchor(SCENE, 'a close-up of a man looking down', 'auto', hint);
@@ -295,4 +310,32 @@ test('chooseAnchor(hint)：按模型指认的段落落位', () => {
     assert.equal(endAnchor.para, 2);
     const firstAnchor = core.chooseAnchor(SCENE, 'a close-up', 'first', hint);
     assert.equal(firstAnchor.para, 0);
+});
+
+test('capPrompt：超长按标点截断，不硬切半句', () => {
+    const long = 'a'.repeat(60) + ', ' + 'b'.repeat(60) + ', ' + 'c'.repeat(400);
+    const r = core.capPrompt(long, 140);
+    assert.equal(r.truncated, true);
+    assert.ok(r.text.length <= 140);
+    assert.equal(r.text.endsWith(','), true, '应停在逗号后');
+
+    const short = core.capPrompt('a short prompt', 400);
+    assert.equal(short.truncated, false);
+    assert.equal(short.text, 'a short prompt');
+});
+
+test('parseRewriteOutput：剥掉模型开场白', () => {
+    assert.equal(
+        core.parseRewriteOutput('好的，我先梳理一下这段剧情，然后给出提示词。silver hair girl, rainy street').prompt,
+        'silver hair girl, rainy street',
+    );
+    assert.equal(
+        core.parseRewriteOutput('Sure, here is the prompt: a girl under an umbrella').prompt,
+        'a girl under an umbrella',
+    );
+    // 正常提示词不能被误伤
+    assert.equal(
+        core.parseRewriteOutput('a woman standing in the rain, cinematic').prompt,
+        'a woman standing in the rain, cinematic',
+    );
 });

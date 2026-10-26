@@ -266,10 +266,22 @@ export function parseRewriteOutput(raw) {
         if (line.length < 6) continue;
         if (/^[#<>{}\[\]|]/.test(line)) continue;          // 标题、标签行
         if (/^(?:说明|解释|注|注意|理由|解析|备注)[:：]/.test(line)) continue;
-        return { prompt: finalizePrompt(line), anchor: '' };
+        return { prompt: finalizePrompt(stripLeadIn(line)), anchor: '' };
     }
 
-    return { prompt: finalizePrompt(text), anchor: '' };
+    return { prompt: finalizePrompt(stripLeadIn(text)), anchor: '' };
+}
+
+/**
+ * 去掉模型的开场白。
+ * 有些模型会先来一句「好的，我先梳理一下这段剧情」「以下是提示词：」再给正文，
+ * 不剥掉的话，这句话会被当成提示词的一部分发给生图模型。
+ */
+function stripLeadIn(text) {
+
+    const CN = /^(?:(?:好的|好|当然|没问题|可以|明白|收到|以下是|下面是|这是|根据|我先|我来|让我|这里|简单来说)[^。！？\n]{0,40}[。！？:：]\s*)+/u;
+    const EN = /^(?:(?:sure|okay|ok|certainly|of course|here(?:'s| is)|below is)[^.!?\n]{0,60}[.!?:]\s*)+/i;
+    return String(text ?? '').replace(CN, '').replace(EN, '').trim();
 }
 
 /** 收尾：去引号/多余空白/句末句号，压成一行 */
@@ -281,6 +293,27 @@ function finalizePrompt(text) {
         .replace(/[，、；]+/g, (m) => (m === '，' ? ', ' : m))
         .trim()
         .slice(0, 600);
+}
+
+/**
+ * 给提示词硬性封顶。
+ *
+ * 现实里总会有模型无视「只输出一行」，把整段剧情复述一遍；不封顶的话，
+ * 生图接口收到的就还是「一大段正文」—— 用户看到的症状正是这个。
+ * 截断点优先落在句号/逗号/分号后面，避免把一句话劈成两半。
+ */
+export function capPrompt(text, maxChars = 400) {
+    const raw = String(text ?? '').trim();
+    const limit = Math.max(80, Number(maxChars) || 400);
+    if (raw.length <= limit) return { text: raw, truncated: false };
+
+    const slice = raw.slice(0, limit);
+    const cut = Math.max(
+        slice.lastIndexOf('. '), slice.lastIndexOf(', '),
+        slice.lastIndexOf('; '), slice.lastIndexOf('。'), slice.lastIndexOf('，'),
+    );
+    const text2 = (cut > limit * 0.5 ? slice.slice(0, cut + 1) : slice).trim();
+    return { text: text2, truncated: true };
 }
 
 /**
@@ -355,6 +388,25 @@ export function pickSceneBlock(blocks, maxChars = 400) {
 }
 
 /**
+ * 「直接取正文」兜底用：把正文里的生图标签**连内容**一起摘掉，再重算 plain。
+ *
+ * 为什么必须在块级别做：normalizeText 只去标签、留内容，正文里若有
+ * `<local_img>1girl, silver hair…</local_img>`，剥完标签会把里面那段
+ * （往往是预设让模型写的提示词或变量串）当正文喂给生图模型，
+ * 于是就出现「提示词里混进预设内容」。
+ *
+ * 注意：不改 index，保持和 DOM 里的段序号一一对应。
+ */
+export function cleanBlocksForPrompt(blocks) {
+    return (blocks || []).map((b) => {
+        const text = stripImageTags(b.text);
+        if (text === b.text) return b;
+        const plain = normalizeText(text);
+        return { ...b, text, plain, skip: plain.length < 4 };
+    });
+}
+
+/**
  * 决定图片插在哪一段之后。
  *
  * @param {string} mes 正文
@@ -426,6 +478,130 @@ export function chooseAnchor(mes, prompt, position = 'auto', hint = '') {
         if (scene) return anchorOf(scene);
     }
     return anchorOf(best || usable[0]);
+}
+
+
+// ───────────────────── 配图标记（标签驱动） ─────────────────────
+
+/**
+ * 默认标记。用纯文本方括号而不是尖括号，原因：
+ * 尖括号会被酒馆的 HTML 清洗和 Markdown 渲染吃掉，正文里可能根本留不下痕迹；
+ * `[[配图]]` 一定作为文本存在，插件能稳定找到，找到后再从 DOM 里隐藏。
+ */
+export const DEFAULT_MARKER = '[[配图]]';
+
+/** 兼容几种常见写法，用户改标记时不用记死 */
+const MARKER_ALIASES = ['[[配图]]', '[配图]', '<配图>', '[插图]', '[[插图]]', '<image>', '[[image]]'];
+
+/** 在正文里找出所有标记位置（字符偏移 + 所在段序号） */
+export function findMarkers(mes, marker = DEFAULT_MARKER) {
+    const src = String(mes ?? '');
+    const needles = [...new Set([marker, ...MARKER_ALIASES])].filter(Boolean);
+    const hits = [];
+
+    for (const needle of needles) {
+        let from = 0;
+        for (;;) {
+            const at = src.indexOf(needle, from);
+            if (at < 0) break;
+            hits.push({ at, end: at + needle.length, text: needle });
+            from = at + needle.length;
+        }
+    }
+    if (!hits.length) return [];
+
+    hits.sort((a, b) => a.at - b.at);
+
+    // 归并重叠（不同别名可能互相包含）
+    const merged = [];
+    for (const h of hits) {
+        const last = merged[merged.length - 1];
+        if (last && h.at < last.end) { last.end = Math.max(last.end, h.end); continue; }
+        merged.push({ ...h });
+    }
+
+    // 算段序号：按空行分段，数一下标记前面有几个换行段
+    const blocks = splitBlocks(src);
+    for (const h of merged) {
+        const before = src.slice(0, h.at);
+        const paraCount = before.split(/\n{2,}/).length - 1;
+        const block = blocks[Math.min(paraCount, Math.max(0, blocks.length - 1))];
+        h.para = block ? block.index : 0;
+        h.onlyMarker = (block ? block.text : '').replace(h.text, '').trim().length === 0;
+    }
+    return merged;
+}
+
+/** 去掉标记文本（给重写模型看的故事片段用） */
+export function stripMarkers(text, marker = DEFAULT_MARKER) {
+    let out = String(text ?? '');
+    for (const needle of [...new Set([marker, ...MARKER_ALIASES])].filter(Boolean)) {
+        out = out.split(needle).join(' ');
+    }
+    return out.replace(/[ \t]{2,}/g, ' ');
+}
+
+/**
+ * 标记之前的正文（重写素材）。
+ * 只取标记**前面**的内容 —— 标签本身就代表「图插在这里」，
+ * 后面的剧情不该影响这张画。
+ */
+export function storyBeforeMarker(mes, markerAt, maxChars = 2400) {
+    const before = String(mes ?? '').slice(0, Math.max(0, markerAt));
+    const text = stripMarkers(before, DEFAULT_MARKER).trim();
+    if (!text) return '';
+    const limit = Math.max(200, Number(maxChars) || 2400);
+    return text.length > limit ? text.slice(text.length - limit) : text;
+}
+
+/**
+ * 标记对应的锚点：插在标记**前面那一段**之后。
+ * 这样图片正好落在标记的位置，标记那一段随后被隐藏，视觉上看不出破绽。
+ */
+export function anchorForMarker(mes, markerAt) {
+    const before = String(mes ?? '').slice(0, Math.max(0, Number(markerAt) || 0));
+    const usable = splitBlocks(before).filter((b) => !b.skip);
+    const last = usable[usable.length - 1];
+    if (last) return { para: last.index, snippet: last.plain.slice(0, 60), byMarker: true };
+    return { para: 0, snippet: '', byMarker: true };
+}
+
+/**
+ * 在 DOM 里隐藏标记文字。
+ *
+ * 标记写成独立一段时整段隐藏（图片会插在这个位置）；
+ * 如果标记混在正文句子里，就只把标记文字抠掉，保留那段。
+ * @returns {number} 处理了几处
+ */
+export function hideMarkersInDom(mesText, marker = DEFAULT_MARKER) {
+    if (!mesText) return 0;
+    const needles = [...new Set([marker, ...MARKER_ALIASES])].filter(Boolean);
+    let touched = 0;
+
+    for (const el of listBlockElements(mesText)) {
+        const text = el.textContent || '';
+        if (!needles.some((n) => text.includes(n))) continue;
+
+        let rest = text;
+        for (const n of needles) rest = rest.split(n).join('');
+        if (rest.trim().length === 0) {
+            if (el.style.display !== 'none') { el.style.display = 'none'; }
+        } else {
+            // 句子里夹着标记：只把标记抠掉
+            const walker = mesText.ownerDocument.createTreeWalker(el, 4 /* TEXT_NODE */);
+            const nodes = [];
+            while (walker.nextNode()) nodes.push(walker.currentNode);
+            for (const node of nodes) {
+                if (needles.some((n) => node.nodeValue.includes(n))) {
+                    let v = node.nodeValue;
+                    for (const n of needles) v = v.split(n).join('');
+                    node.nodeValue = v;
+                }
+            }
+        }
+        touched++;
+    }
+    return touched;
 }
 
 // ───────────────────────────── DOM 定位 ─────────────────────────────
@@ -540,6 +716,7 @@ export function createFigureElement(doc, item, { showCaption = false, size = 'me
     fig.setAttribute(IF_STATUS_ATTR, item.status || 'pending');
     fig.setAttribute(IF_SRC_ATTR, item.url || '');
     fig.setAttribute(IF_ANCHOR_ATTR, anchorKey(item.anchor));
+    fig.setAttribute('data-if-source', item.source || '');
     if (item.swipe !== undefined) fig.setAttribute('data-if-swipe', String(item.swipe));
     if (size) fig.setAttribute('data-if-size', size);
 
@@ -585,6 +762,19 @@ export function createFigureElement(doc, item, { showCaption = false, size = 'me
     }
 
     fig.appendChild(body);
+
+    // 标记「这张没重写，只是截了正文」—— 静默降级是最坑人的，必须让人一眼看见
+    if (item.fallback) {
+        const badge = doc.createElement('span');
+        badge.className = 'if-figure__badge';
+        badge.textContent = '未重写';
+        badge.setAttribute(
+            'title',
+            `提示词重写没成功，这张图用的是直接截取的正文。
+原因：${item.fallbackReason || '未知'}`,
+        );
+        fig.appendChild(badge);
+    }
 
     if (showCaption && item.prompt) {
         const cap = doc.createElement('figcaption');
@@ -666,6 +856,7 @@ export function describeFigure(fig) {
         id: fig.getAttribute(IF_ID_ATTR),
         status: fig.getAttribute(IF_STATUS_ATTR),
         src: fig.getAttribute(IF_SRC_ATTR),
+        source: fig.getAttribute('data-if-source'),
         text: (fig.textContent || '').trim(),
     };
 }

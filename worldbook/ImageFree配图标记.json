@@ -1,0 +1,48 @@
+{
+    "entries": {
+        "0": {
+            "key": [
+                "配图",
+                "插图",
+                "画面"
+            ],
+            "keysecondary": [],
+            "comment": "ImageFree 配图标记（常驻）",
+            "content": "[配图标记 · 必须遵守]\n在正文的合适位置留下插图标记，读者会在标记处看到一张插图。\n\n写法：单独一行，只写 [[配图]]。前后不加空格、引号、说明或任何别的字。\n位置：一段剧情推进完成之后；场景切换、情绪转折、关键动作定格的地方。\n频率：每 2~3 个自然段插入 1 个；单条回复最多 2 个；不要连着两行都写标记。\n禁止：不要在对话中间插；不要写在括号、引用或省略号里；不要解释这个标记；不要自己描述图片内容。\n\n示例（照这个格式写）：\n他把伞往她那边偏了偏，雨水顺着伞骨滴在她肩上。\n[[配图]]\n她没接话，只把袖子往上拉了拉，指尖有点凉。",
+            "constant": true,
+            "vectorized": false,
+            "selective": true,
+            "selectiveLogic": 0,
+            "addMemo": true,
+            "order": 100,
+            "position": 0,
+            "disable": false,
+            "excludeRecursion": false,
+            "preventRecursion": true,
+            "matchPersonaDescription": false,
+            "matchCharacterDescription": false,
+            "matchCharacterPersonality": false,
+            "matchCharacterDepthPrompt": false,
+            "matchScenario": false,
+            "matchCreatorNotes": false,
+            "delayUntilRecursion": false,
+            "probability": 100,
+            "useProbability": true,
+            "depth": 4,
+            "group": "",
+            "groupOverride": false,
+            "groupWeight": 100,
+            "scanDepth": null,
+            "caseSensitive": null,
+            "matchWholeWords": null,
+            "useGroupScoring": false,
+            "automationId": "",
+            "role": 0,
+            "sticky": 0,
+            "cooldown": 0,
+            "delay": 0,
+            "uid": 0,
+            "displayIndex": 0
+        }
+    }
+}

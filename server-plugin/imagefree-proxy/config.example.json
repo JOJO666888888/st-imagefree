@@ -1,0 +1,7 @@
+{
+    "allowHosts": [
+        "127.0.0.1",
+        "your-image-relay.example.com"
+    ],
+    "timeoutMs": 180000
+}

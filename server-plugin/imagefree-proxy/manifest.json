@@ -1,0 +1,12 @@
+{
+    "name": "imagefree-proxy",
+    "display_name": "ImageFree Proxy",
+    "version": "1.0.0",
+    "description": "Server-side relay for st-imagefree image generation (bypasses browser CORS).",
+    "author": "workbuddy",
+    "type": "plugin",
+    "entry": "index.js",
+    "loading_order": 100,
+    "requires": [],
+    "optional": []
+}

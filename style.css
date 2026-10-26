@@ -91,6 +91,20 @@
 .if-figure[data-if-size="small"] { --if-img-max: 180px; }
 .if-figure[data-if-size="large"] { --if-img-max: 440px; }
 
+/* 降级标记：这张图没走重写，是正文直出 */
+.if-figure__badge {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.7em;
+    line-height: 1.6;
+    cursor: help;
+    color: #d9a038;
+    border: 1px solid rgba(217, 160, 56, 0.55);
+    background: rgba(217, 160, 56, 0.12);
+}
+
 /* 生成中：骨架 + 呼吸点 */
 .if-figure__skeleton {
     position: relative;
@@ -246,6 +260,18 @@
     min-width: 110px;
 }
 
+/* 顶部警告条 */
+.imagefree-settings .if-warn-box {
+    margin: 6px 0 8px;
+    padding: 7px 10px;
+    border-radius: 8px;
+    font-size: 0.84em;
+    line-height: 1.5;
+    color: #f0b95a;
+    border: 1px solid rgba(217, 160, 56, 0.5);
+    background: rgba(217, 160, 56, 0.1);
+}
+
 /* 重写 API 的输入区 / 结果预览 */
 .imagefree-settings .if-textarea {
     font-family: var(--monoFontFamily, ui-monospace, SFMono-Regular, Consolas, monospace);
@@ -258,6 +284,12 @@
 
 .imagefree-settings .if-subdrawer .inline-drawer-content {
     padding-left: 4px;
+}
+
+/* 置灰（不适用时） */
+.imagefree-settings .if-dimmed {
+    opacity: 0.45;
+    pointer-events: none;
 }
 
 /* 通用隐藏（来源切换时用 toggleClass 控制） */
